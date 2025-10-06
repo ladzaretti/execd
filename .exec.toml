@@ -1,0 +1,12 @@
+listen_addr = ":8081"
+token = "token"
+
+[[endpoints]]
+path = "/ping"
+token = "ping"
+method = "get"
+cmd = ["/bin/echo", "pong"]
+
+[[endpoints]]
+path = "/ls"
+cmd = ["ls", "-la", "/tmp"]
