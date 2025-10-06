@@ -1,0 +1,195 @@
+version: "2"
+
+linters:
+  default: none
+  # run 'golangci-lint help linters' to see the list of supported linters
+  enable:
+    # Enabled by default
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+    # Enabled, disabled by default
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - containedctx
+    - contextcheck
+    - copyloopvar
+    - cyclop
+    - decorder
+    - dogsled
+    - dupl
+    - dupword
+    - durationcheck
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exptostd
+    - fatcontext
+    - forcetypeassert
+    # - funlen
+    - ginkgolinter
+    - gocheckcompilerdirectives
+    - gochecknoinits
+    - gochecksumtype
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    # - godot
+    # - godox
+    - goheader
+    - gomoddirectives
+    - gomodguard
+    - goprintffuncname
+    - gosec
+    - gosmopolitan
+    - govet
+    - grouper
+    - iface
+    - importas
+    - inamedparam
+    - ineffassign
+    - interfacebloat
+    - intrange
+    - loggercheck
+    - maintidx
+    - makezero
+    - mirror
+    - misspell
+    - musttag
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - nlreturn
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - paralleltest
+    - perfsprint
+    - prealloc
+    - predeclared
+    - promlinter
+    - protogetter
+    - reassign
+    - recvcheck
+    - revive
+    - rowserrcheck
+    - sloglint
+    - spancheck
+    - sqlclosecheck
+    - staticcheck
+    - tagalign
+    # - tagliatelle
+    - testableexamples
+    - testifylint
+    - testpackage
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+    - wsl
+    - zerologlint
+
+  settings:
+    tagalign:
+      align: true
+      sort: true
+      order:
+        - json
+        - yaml
+        - yml
+        - toml
+        - mapstructure
+        - binding
+        - validate
+    cyclop:
+      max-complexity: 15
+    gosec:
+      excludes:
+        - G104
+    revive:
+      enable-all-rules: true
+      rules:
+        - name: max-public-structs
+          disabled: true
+        - name: import-shadowing
+          disabled: true
+        - name: struct-tag
+          arguments:
+            - "toml,commented"
+        - name: add-constant
+          disabled: true
+        - name: bare-return
+          disabled: true
+        - name: cognitive-complexity
+          disabled: true
+        - name: cyclomatic
+          disabled: true
+        - name: exported
+          disabled: true
+        - name: line-length-limit
+          disabled: true
+        - name: package-comments
+          disabled: true
+        - name: function-length
+          disabled: true
+        - name: unexported-return
+          disabled: true
+        - name: var-naming
+          arguments:
+            - []
+            - []
+            - - skipPackageNameChecks: true
+    wsl:
+      allow-cuddle-used-in-block: true
+      force-err-cuddling: true
+    nlreturn:
+      block-size: 4
+    errorlint:
+      errorf: false
+    paralleltest:
+      ignore-missing: true
+    errcheck:
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprint
+        - fmt.Fprintln
+        - (*github.com/ncruces/go-sqlite3.Stmt).BindText
+        - (*github.com/ncruces/go-sqlite3.Stmt).BindJSON
+        - (*github.com/ncruces/go-sqlite3.Stmt).BindInt64
+        - (*github.com/ncruces/go-sqlite3.Stmt).BindInt
+        - (*github.com/ncruces/go-sqlite3.Stmt).BindBlob
+        - (*github.com/ncruces/go-sqlite3.Stmt).Reset
+        - (*github.com/ncruces/go-sqlite3.Stmt).Close
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+    - gofumpt
+  settings:
+    gofmt:
+      rewrite-rules:
+        - pattern: "interface{}"
+          replacement: "any"
+    goimports:
+      local-prefixes:
+        - github.com/ladzaretti/vlt-cli
+
+run:
+  timeout: "3m"

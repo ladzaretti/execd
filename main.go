@@ -19,8 +19,10 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+var Version = "v0.0.0"
+
 const (
-	defaultConfigName = ".exec.toml"
+	defaultConfigName = ".execd.toml"
 	defaultListenAddr = ":8081"
 	redact            = "*****"
 )
@@ -37,6 +39,25 @@ var (
 	}
 	flightGroup singleflight.Group
 )
+
+//nolint:revive // deep-exit: a cli only helper.
+func subcommands() {
+	if len(os.Args) == 1 {
+		return
+	}
+
+	switch os.Args[1] {
+	case "version":
+		if len(os.Args) > 2 {
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nusage: %s [version]\n", strings.Join(os.Args[1:], " "), os.Args[0])
+			os.Exit(2)
+		}
+
+		fmt.Println(Version)
+		os.Exit(0)
+	default:
+	}
+}
 
 func mustInitialize() {
 	configPath := flag.String("config", "", "config file path")
@@ -72,11 +93,14 @@ func newExecHandler(e Endpoint) http.Handler {
 		if r.Method != method {
 			w.Header().Set("Allow", method)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
 			return
 		}
 
+		ctx := r.Context()
+
 		v, err, _ := flightGroup.Do(e.Path, func() (any, error) {
-			return e.run(r.Context())
+			return e.run(ctx)
 		})
 		if err != nil {
 			var out []byte
@@ -101,13 +125,15 @@ func newExecHandler(e Endpoint) http.Handler {
 	})
 }
 
-func withAuthMiddleware(token string, h http.Handler) http.Handler {
+func withAuthMiddleware(token string, unsafe bool, h http.Handler) http.Handler {
 	const bearer = "Bearer "
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
+		switch {
+		case r.Method == http.MethodOptions, unsafe:
 			h.ServeHTTP(w, r)
 			return
+		default:
 		}
 
 		auth := r.Header.Get("Authorization")
@@ -125,6 +151,7 @@ func withAuthMiddleware(token string, h http.Handler) http.Handler {
 		h.ServeHTTP(w, r)
 	})
 }
+
 func withCORS(h http.Handler) http.Handler {
 	methods := strings.Join(allowedHTTPMethods, ", ")
 
@@ -208,11 +235,17 @@ func withTracingMiddleware(h http.Handler) http.Handler {
 }
 
 func requestID(ctx context.Context) string {
-	v, _ := ctx.Value(requestKey).(string)
+	v, ok := ctx.Value(requestKey).(string)
+	if !ok {
+		return ""
+	}
+
 	return v
 }
 
 func main() {
+	subcommands()
+
 	mustInitialize()
 
 	mux := http.NewServeMux()
@@ -220,7 +253,7 @@ func main() {
 	for _, e := range config.Endpoints {
 		h, token := newExecHandler(e), cmp.Or(e.Token, config.Token)
 
-		h = withAuthMiddleware(token, h)
+		h = withAuthMiddleware(token, e.Unsafe, h)
 		h = withCORS(h)
 		h = withTracingMiddleware(h)
 
@@ -228,8 +261,9 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:    config.ListenAddr,
-		Handler: mux,
+		Addr:              config.ListenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {

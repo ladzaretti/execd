@@ -14,10 +14,10 @@ import (
 )
 
 type Config struct {
-	LogLevel   string     `json:"log_level,omitempty" toml:"log_level,commented"`
-	Token      string     `json:"token,omitempty" toml:"token,commented"`
+	LogLevel   string     `json:"log_level,omitempty"   toml:"log_level,commented"`
+	Token      string     `json:"token,omitempty"       toml:"token,commented"`
 	ListenAddr string     `json:"listen_addr,omitempty" toml:"listen_addr,commented"`
-	Endpoints  []Endpoint `json:"endpoints,omitempty" toml:"endpoints,commented"`
+	Endpoints  []Endpoint `json:"endpoints,omitempty"   toml:"endpoints,commented"`
 }
 
 func (c *Config) validate() error {
@@ -35,7 +35,12 @@ func (c *Config) validate() error {
 			return fmt.Errorf("endpoint[%d]: %w", i, err)
 		}
 
-		if c.Token == "" && e.Token == "" {
+		if e.Unsafe {
+			logger.Warn("endpoint registered without token protection (unsafe mode enabled)",
+				"path", e.Path,
+				"index", i,
+			)
+		} else if c.Token == "" && e.Token == "" {
 			return fmt.Errorf("token missing for path: %q: set global token or endpoint[%d].token", e.Path, i)
 		}
 
@@ -123,12 +128,11 @@ func loadFileConfig(path string) (*Config, error) {
 
 	c, err := parseFileConfig(path)
 	if err != nil {
-		// config file not found at default location; fallback to empty config
-		if path == "" && errors.Is(err, fs.ErrNotExist) {
-			c = &Config{}
-		} else {
+		if path != "" || !errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("load config %s: %w", path, err)
 		}
+
+		c = &Config{}
 	}
 
 	if err := c.setDefaults(); err != nil {

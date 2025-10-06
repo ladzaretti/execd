@@ -1,0 +1,28 @@
+version: 2
+
+builds:
+  - id: "execd"
+    binary: execd
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -X main.Version={{ if .IsSnapshot }}{{ .Version }}{{ else }}{{ .Tag }}{{ end }}
+
+snapshot:
+  version_template: "{{ .Version }}-devel+{{ .ShortCommit }}"
+
+archives:
+  - id: "execd"
+    name_template: "execd{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: true
+
+    files:
+      - LICENSE
+
+    ids: [execd]
+    formats: [tar.gz]

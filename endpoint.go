@@ -14,19 +14,24 @@ import (
 	"time"
 )
 
-type Endpoint struct {
-	Path    string   `json:"path,omitempty" toml:"path,commented"`
-	Token   string   `json:"token,omitempty" toml:"token,commented"`
-	Method  string   `json:"method,omitempty" toml:"method,commented"`
-	Cmd     []string `json:"cmd,omitempty" toml:"cmd,commented"`
-	Env     []string `json:"env,omitempty" toml:"env,commented"`
-	Timeout string   `json:"timeout,omitempty" toml:"timeout,commented"`
-
+type endpointResolvedConfig struct {
 	method  string
 	cmd     string
 	args    []string
 	env     []string
 	timeout time.Duration
+}
+
+type Endpoint struct {
+	Path    string   `json:"path,omitempty"    toml:"path,commented"`
+	Token   string   `json:"token,omitempty"   toml:"token,commented"`
+	Method  string   `json:"method,omitempty"  toml:"method,commented"`
+	Cmd     []string `json:"cmd,omitempty"     toml:"cmd,commented"`
+	Env     []string `json:"env,omitempty"     toml:"env,commented"`
+	Timeout string   `json:"timeout,omitempty" toml:"timeout,commented"`
+	Unsafe  bool     `json:"unsafe,omitempty"  toml:"unsafe,commented"`
+
+	endpointResolvedConfig
 }
 
 func (e *Endpoint) validate() error {
@@ -97,6 +102,7 @@ func (e *Endpoint) run(ctx context.Context) ([]byte, error) {
 		defer cancel()
 	}
 
+	// #nosec G204 // command and args come from trusted config
 	cmd := exec.CommandContext(ctx, e.cmd, e.args...)
 
 	var out bytes.Buffer
