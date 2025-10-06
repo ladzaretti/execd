@@ -1,223 +1,42 @@
 package main
 
 import (
-	"bytes"
 	"cmp"
+	"context"
+	"crypto/subtle"
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
-	"log"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"slices"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/pelletier/go-toml/v2"
+	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 )
-
-type Endpoint struct {
-	Path   string   `json:"path,omitempty" toml:"path,commented"`
-	Token  string   `json:"token,omitempty" toml:"token,commented"`
-	Method string   `json:"method,omitempty" toml:"method,commented"`
-	Cmd    []string `json:"cmd,omitempty" toml:"cmd,commented"`
-}
-
-var allowedHTTPMethods []string = []string{
-	http.MethodGet,
-	http.MethodPost,
-	http.MethodPut,
-	http.MethodDelete,
-	http.MethodOptions,
-}
-
-func (e Endpoint) validate() error {
-	if e.Path == "" {
-		return errors.New("route path is empty")
-	}
-
-	if e.Method != "" && !slices.Contains(allowedHTTPMethods, strings.ToUpper(e.Method)) {
-		return fmt.Errorf("unsupported method %q for path %q", e.Method, e.Path)
-	}
-
-	if !strings.HasPrefix(e.Path, "/") {
-		return fmt.Errorf("invalid route path %q: must start with '/'", e.Path)
-	}
-
-	if strings.HasSuffix(e.Path, "/") {
-		return fmt.Errorf("invalid route path %q: must not end with '/'", e.Path)
-	}
-
-	if len(e.Cmd) == 0 || e.Cmd[0] == "" {
-		return errors.New("cmd must be a non-empty argv")
-	}
-
-	return nil
-}
-
-func (e Endpoint) redact() Endpoint {
-	if e.Token == "" {
-		return e
-	}
-
-	redacted := e
-	redacted.Token = "*****"
-
-	return redacted
-}
-
-type Config struct {
-	LogLevel   string     `json:"log_level,omitempty" toml:"log_level,commented"`
-	Token      string     `json:"token,omitempty" toml:"token,commented"`
-	ListenAddr string     `json:"listen_addr,omitempty" toml:"listen_addr,commented"`
-	Endpoints  []Endpoint `json:"endpoints,omitempty" toml:"endpoints,commented"`
-}
-
-func (c *Config) validate() error {
-	if c.ListenAddr == "" {
-		return errors.New("listen_addr must not be empty")
-	}
-
-	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
-		return fmt.Errorf("listen_addr must be host:port or :port: %w", err)
-	}
-
-	seen := make(map[string]struct{}, len(c.Endpoints))
-	for i, e := range c.Endpoints {
-		if err := e.validate(); err != nil {
-			return fmt.Errorf("endpoint[%d]: %w", i, err)
-		}
-
-		if c.Token == "" && e.Token == "" {
-			return fmt.Errorf("token missing for path: %q: set global token or endpoint[%d].token", e.Path, i)
-		}
-
-		if _, dup := seen[e.Path]; dup {
-			return fmt.Errorf("duplicate endpoint: %s", e.Path)
-		}
-
-		seen[e.Path] = struct{}{}
-	}
-
-	return nil
-}
-
-// setDefaults fills zero-valued optional fields.
-func (c *Config) setDefaults() error {
-	if c == nil {
-		return errors.New("cannot set defaults on nil config")
-	}
-
-	c.ListenAddr = cmp.Or(c.ListenAddr, defaultListenAddr)
-
-	for i, e := range c.Endpoints {
-		c.Endpoints[i].Method = cmp.Or(e.Method, http.MethodPost)
-	}
-
-	return nil
-}
-
-func (c *Config) redact() *Config {
-	if c == nil {
-		return nil
-	}
-
-	redacted := *c
-
-	if redacted.Token != "" {
-		redacted.Token = "*****"
-	}
-
-	redacted.Endpoints = append([]Endpoint(nil), redacted.Endpoints...)
-	for i, e := range redacted.Endpoints {
-		redacted.Endpoints[i] = e.redact()
-	}
-
-	return &redacted
-}
 
 const (
 	defaultConfigName = ".exec.toml"
 	defaultListenAddr = ":8081"
+	redact            = "*****"
 )
-
-func defaultConfigPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
-	return filepath.Join(home, defaultConfigName), nil
-}
-
-func parseFileConfig(path string) (*Config, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("config: stat file: %w", err)
-	}
-
-	if (fi.Mode().Perm() & 0o022) != 0 {
-		logger.Warn("config file is writable by others", "path", path)
-	}
-
-	raw, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return nil, err
-	}
-
-	var config Config
-	if err := toml.Unmarshal(raw, &config); err != nil {
-		return nil, fmt.Errorf("config: parse file: %w", err)
-	}
-
-	return &config, nil
-}
-
-// LoadFileConfig loads the config from the given or default path.
-func LoadFileConfig(path string) (*Config, error) {
-	if path == "" {
-		return nil, errors.New("config path must be set")
-	}
-
-	c, err := parseFileConfig(path)
-	if err != nil {
-		// config file not found at default location; fallback to empty config
-		if path == "" && errors.Is(err, fs.ErrNotExist) {
-			c = &Config{}
-		} else {
-			return nil, fmt.Errorf("load config %s: %w", path, err)
-		}
-	}
-
-	if err := c.setDefaults(); err != nil {
-		return nil, err
-	}
-
-	return c, c.validate()
-}
 
 var (
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	config *Config
+	logger             = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	config             *Config
+	allowedHTTPMethods = []string{
+		http.MethodGet,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodDelete,
+		http.MethodOptions,
+	}
+	flightGroup singleflight.Group
 )
-
-func parseLogLevel(s string) (slog.Level, error) {
-	if s == "" {
-		return slog.LevelInfo, nil
-	}
-
-	var lvl slog.Level
-	if err := lvl.UnmarshalText([]byte(s)); err != nil {
-		return lvl, err
-	}
-
-	return lvl, nil
-}
 
 func mustInitialize() {
 	configPath := flag.String("config", "", "config file path")
@@ -230,7 +49,7 @@ func mustInitialize() {
 
 	*configPath = cmp.Or(*configPath, defaultPath)
 
-	c, err := LoadFileConfig(*configPath)
+	c, err := loadFileConfig(*configPath)
 	if err != nil {
 		panic(fmt.Errorf("invalid config: %w", err))
 	}
@@ -247,45 +66,58 @@ func mustInitialize() {
 }
 
 func newExecHandler(e Endpoint) http.Handler {
-	method := strings.ToUpper(e.Method)
+	method := strings.ToUpper(e.method)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != method {
-			http.Error(w, fmt.Sprintf("unsupported methods: %s", r.Method), http.StatusMethodNotAllowed)
+			w.Header().Set("Allow", method)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		cmdName, args := e.Cmd[0], e.Cmd[1:]
-		if _, err := exec.LookPath(cmdName); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		v, err, _ := flightGroup.Do(e.Path, func() (any, error) {
+			return e.run(r.Context())
+		})
+		if err != nil {
+			var out []byte
+			if b, ok := v.([]byte); ok {
+				out = b
+			}
+
+			http.Error(w, fmt.Sprintf("exec failed: %v\n%s", err, string(out)), http.StatusInternalServerError)
+
 			return
 		}
 
-		cmd := exec.CommandContext(r.Context(), cmdName, args...)
-
-		var out bytes.Buffer
-
-		cmd.Stdout = &out
-		cmd.Stderr = &out
-		cmd.Env = []string{}
-
-		if err := cmd.Run(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		bs, ok := v.([]byte)
+		if !ok || bs == nil {
+			http.Error(w, fmt.Sprintf("exec handler: unexpected return value type %T", v), http.StatusInternalServerError)
 			return
 		}
 
-		w.Write(out.Bytes())
+		if _, werr := w.Write(bs); werr != nil {
+			logger.Warn("write response failed", "err", werr, "id", requestID(r.Context()))
+		}
 	})
 }
 
 func withAuthMiddleware(token string, h http.Handler) http.Handler {
+	const bearer = "Bearer "
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			h.ServeHTTP(w, r)
 			return
 		}
 
-		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+		auth := r.Header.Get("Authorization")
+		if len(auth) < len(bearer) || !strings.EqualFold(auth[:len(bearer)], bearer) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		got, want := []byte(auth[len(bearer):]), []byte(token)
+		if subtle.ConstantTimeCompare(got, want) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -293,9 +125,8 @@ func withAuthMiddleware(token string, h http.Handler) http.Handler {
 		h.ServeHTTP(w, r)
 	})
 }
-
-func withCORS(next http.Handler) http.Handler {
-	methods := strings.Join(allowedHTTPMethods, ",")
+func withCORS(h http.Handler) http.Handler {
+	methods := strings.Join(allowedHTTPMethods, ", ")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if origin := r.Header.Get("Origin"); origin == "" {
@@ -313,8 +144,72 @@ func withCORS(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		h.ServeHTTP(w, r)
 	})
+}
+
+type ctxKey string
+
+var requestKey ctxKey = "requestKey"
+
+type statusWriter struct {
+	http.ResponseWriter
+
+	status int
+	n      int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+
+	n, err := w.ResponseWriter.Write(b)
+	w.n += n
+
+	return n, err
+}
+
+func withTracingMiddleware(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-Id")
+		if id == "" {
+			id = uuid.NewString()
+		}
+
+		ctx := context.WithValue(r.Context(), requestKey, id)
+
+		sw := &statusWriter{ResponseWriter: w}
+		sw.Header().Set("X-Request-Id", id)
+
+		logger.Debug("request received",
+			"id", id,
+			"path", r.URL.Path,
+			"method", r.Method,
+			"remote", r.RemoteAddr,
+		)
+
+		defer func(start time.Time) {
+			logger.Debug("request completed",
+				"id", id,
+				"status", sw.status,
+				"bytes", sw.n,
+				"duration", time.Since(start).String(),
+			)
+		}(time.Now())
+
+		h.ServeHTTP(sw, r.WithContext(ctx))
+	})
+}
+
+func requestID(ctx context.Context) string {
+	v, _ := ctx.Value(requestKey).(string)
+	return v
 }
 
 func main() {
@@ -327,17 +222,39 @@ func main() {
 
 		h = withAuthMiddleware(token, h)
 		h = withCORS(h)
+		h = withTracingMiddleware(h)
 
 		mux.Handle(e.Path, h)
 	}
 
 	srv := &http.Server{
-		Addr:         config.ListenAddr,
-		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:    config.ListenAddr,
+		Handler: mux,
 	}
 
-	log.Fatal(srv.ListenAndServe())
+	go func() {
+		logger.Info("server listening", "addr", config.ListenAddr)
+
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("server error", "err", err)
+		}
+	}()
+
+	ch := make(chan os.Signal, 1)
+	defer close(ch)
+
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+
+	sig := <-ch
+
+	logger.Info("server signaled", "signal", sig.String())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		logger.Error("server shutdown error", "err", err)
+	}
+
+	logger.Info("server stopped")
 }

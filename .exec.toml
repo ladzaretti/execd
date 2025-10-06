@@ -1,5 +1,6 @@
 listen_addr = ":8081"
 token = "token"
+log_level = "debug"
 
 [[endpoints]]
 path = "/ping"
@@ -10,3 +11,21 @@ cmd = ["/bin/echo", "pong"]
 [[endpoints]]
 path = "/ls"
 cmd = ["ls", "-la", "/tmp"]
+
+[[endpoints]]
+path = "/sleep"
+timeout = "5s"
+cmd = ["sleep", "10"]
+
+[[endpoints]]
+path = "/false"
+cmd = ["false"]
+
+[[endpoints]]
+path = "/env1"
+cmd = ["env"]
+env = ["PATH"]
+
+[[endpoints]]
+path = "/env2"
+cmd = ["env"]
