@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,10 +17,19 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/sync/singleflight"
 )
 
 var Version = "v0.0.0"
+
+type execState string
+
+const (
+	execStateQueued    execState = "queued"
+	execStateRunning   execState = "running"
+	execStateCompleted execState = "completed"
+	execStateFailed    execState = "failed"
+	execStateCanceled  execState = "canceled"
+)
 
 const (
 	defaultConfigName = ".execd.toml"
@@ -37,7 +47,6 @@ var (
 		http.MethodDelete,
 		http.MethodOptions,
 	}
-	flightGroup singleflight.Group
 )
 
 //nolint:revive // deep-exit: a cli only helper.
@@ -59,6 +68,7 @@ func subcommands() {
 	}
 }
 
+//nolint:revive // deep-exit: allowed, mustInitialize is only called at startup
 func mustInitialize() {
 	configPath := flag.String("config", "", "config file path")
 	flag.Parse()
@@ -72,13 +82,11 @@ func mustInitialize() {
 
 	c, err := loadFileConfig(*configPath)
 	if err != nil {
-		panic(fmt.Errorf("invalid config: %w", err))
+		logger.Error("invalid config", "err", err)
+		os.Exit(1)
 	}
 
-	l, err := parseLogLevel(c.LogLevel)
-	if err != nil {
-		panic(fmt.Errorf("invalid log level: %w", err))
-	}
+	l, _ := parseLogLevel(c.LogLevel) //  already validated during config parsing
 
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l}))
 	logger.Info("resolved config", "path", configPath, "config", c.redact())
@@ -86,7 +94,42 @@ func mustInitialize() {
 	config = c
 }
 
-func newExecHandler(e Endpoint) http.Handler {
+func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, "missing job id", http.StatusBadRequest)
+			return
+		}
+
+		job, ok := jobs.load(id)
+		if !ok {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, job)
+
+		case http.MethodDelete:
+			if job.cancel == nil {
+				http.Error(w, "job not cancellable", http.StatusBadRequest)
+				return
+			}
+
+			job.cancel()
+
+			w.WriteHeader(http.StatusNoContent)
+
+		default:
+			w.Header().Set("Allow", "GET, DELETE")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+}
+
+func newExecHandler(appCtx context.Context, e Endpoint, jobs *safeMap[string, RequestState]) http.Handler {
 	method := strings.ToUpper(e.method)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -97,32 +140,75 @@ func newExecHandler(e Endpoint) http.Handler {
 			return
 		}
 
-		ctx := r.Context()
+		v, ok := r.Context().Value(requestKey).(string)
+		if !ok {
+			v = ""
+		}
 
-		v, err, _ := flightGroup.Do(e.Path, func() (any, error) {
-			return e.run(ctx)
+		id := v
+
+		jobs.store(id, RequestState{
+			State: execStateQueued,
 		})
-		if err != nil {
-			var out []byte
-			if b, ok := v.([]byte); ok {
-				out = b
-			}
 
-			http.Error(w, fmt.Sprintf("exec failed: %v\n%s", err, string(out)), http.StatusInternalServerError)
+		w.Header().Set("Location", "/jobs/"+id)
+		writeJSON(w, http.StatusAccepted, struct {
+			ID string `json:"id,omitempty"`
+		}{ID: id})
 
-			return
-		}
-
-		bs, ok := v.([]byte)
-		if !ok || bs == nil {
-			http.Error(w, fmt.Sprintf("exec handler: unexpected return value type %T", v), http.StatusInternalServerError)
-			return
-		}
-
-		if _, werr := w.Write(bs); werr != nil {
-			logger.Warn("write response failed", "err", werr, "id", requestID(r.Context()))
-		}
+		go runRequest(appCtx, e, jobs, id)
 	})
+}
+
+func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestState], id string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs.store(id, RequestState{
+		State:  execStateRunning,
+		cancel: cancel,
+	})
+
+	execResult, runErr := e.run(ctx)
+
+	completed := RequestState{
+		State:  execStateCompleted,
+		cancel: nil,
+	}
+
+	if execResult != nil {
+		completed.Result = *execResult
+	}
+
+	if runErr != nil {
+		completed.State = execStateFailed
+	}
+
+	if execResult.ExitCode != nil && *execResult.ExitCode != 0 {
+		completed.State = execStateFailed
+	}
+
+	jobs.store(id, completed)
+
+	go deleteJobAfter(ctx, jobs, id, 60*time.Minute)
+}
+
+func deleteJobAfter(ctx context.Context, jobs *safeMap[string, RequestState], id string, after time.Duration) {
+	select {
+	case <-time.After(after):
+		jobs.delete(id)
+	case <-ctx.Done():
+		return
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		logger.Warn("encode/write response failed", "err", err)
+	}
 }
 
 func withAuthMiddleware(token string, unsafe bool, h http.Handler) http.Handler {
@@ -234,13 +320,10 @@ func withTracingMiddleware(h http.Handler) http.Handler {
 	})
 }
 
-func requestID(ctx context.Context) string {
-	v, ok := ctx.Value(requestKey).(string)
-	if !ok {
-		return ""
-	}
-
-	return v
+type RequestState struct {
+	State  execState  `json:"state,omitempty"`
+	Result ExecResult `json:"result"`
+	cancel func()
 }
 
 func main() {
@@ -248,17 +331,26 @@ func main() {
 
 	mustInitialize()
 
-	mux := http.NewServeMux()
+	mux, execResults := http.NewServeMux(), newSafeMap[string, RequestState]()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+	go execResults.periodicCompact(ctx, 60*time.Minute)
 
 	for _, e := range config.Endpoints {
-		h, token := newExecHandler(e), cmp.Or(e.Token, config.Token)
+		h, token := newExecHandler(ctx, e, execResults), cmp.Or(e.Token, config.Token)
 
-		h = withAuthMiddleware(token, e.Unsafe, h)
+		h = withAuthMiddleware(token, e.NoAuth, h)
 		h = withCORS(h)
 		h = withTracingMiddleware(h)
 
 		mux.Handle(e.Path, h)
 	}
+
+	js := newJobsHandler(execResults)
+	js = withCORS(js)
+	js = withTracingMiddleware(js)
+
+	mux.Handle("/jobs/{id}", js)
 
 	srv := &http.Server{
 		Addr:              config.ListenAddr,
@@ -274,19 +366,15 @@ func main() {
 		}
 	}()
 
-	ch := make(chan os.Signal, 1)
-	defer close(ch)
+	<-ctx.Done()
+	cancel()
 
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	logger.Info("server signaled")
 
-	sig := <-ch
-
-	logger.Info("server signaled", "signal", sig.String())
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctxShutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(ctxShutdown); err != nil {
 		logger.Error("server shutdown error", "err", err)
 	}
 

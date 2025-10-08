@@ -11,12 +11,13 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
-type endpointResolvedConfig struct {
+type resolvedEndpoint struct {
 	method  string
-	cmd     string
+	command string
 	args    []string
 	env     []string
 	timeout time.Duration
@@ -28,10 +29,12 @@ type Endpoint struct {
 	Method  string   `json:"method,omitempty"  toml:"method,commented"`
 	Cmd     []string `json:"cmd,omitempty"     toml:"cmd,commented"`
 	Env     []string `json:"env,omitempty"     toml:"env,commented"`
+	UID     uint32   `json:"uid,omitempty"     toml:"uid,commented"`
+	GID     uint32   `json:"gid,omitempty"     toml:"gid,commented"`
 	Timeout string   `json:"timeout,omitempty" toml:"timeout,commented"`
-	Unsafe  bool     `json:"unsafe,omitempty"  toml:"unsafe,commented"`
+	NoAuth  bool     `json:"no_auth,omitempty" toml:"no_auth,commented"`
 
-	endpointResolvedConfig
+	resolvedEndpoint
 }
 
 func (e *Endpoint) validate() error {
@@ -64,17 +67,17 @@ func (e *Endpoint) validate() error {
 	return nil
 }
 
-func (e *Endpoint) complete() {
+func (e *Endpoint) resolve() {
 	e.method = cmp.Or(e.Method, http.MethodPost)
-	e.cmd, e.args = e.Cmd[0], e.Cmd[1:]
+	e.command, e.args = e.Cmd[0], e.Cmd[1:]
 
-	e.env = make([]string, len(e.Env))
+	e.env = make([]string, 0, len(e.Env))
 	for _, key := range e.Env {
 		e.env = append(e.env, key, os.Getenv(key))
 	}
 
 	if e.Timeout != "" {
-		t, _ := time.ParseDuration(e.Timeout)
+		t, _ := time.ParseDuration(e.Timeout) // validated at [Endpoint.validate]
 		e.timeout = t
 	}
 }
@@ -90,8 +93,15 @@ func (e *Endpoint) redact() Endpoint {
 	return redacted
 }
 
-func (e *Endpoint) run(ctx context.Context) ([]byte, error) {
-	if _, err := exec.LookPath(e.cmd); err != nil {
+type ExecResult struct {
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+func (e *Endpoint) run(ctx context.Context) (*ExecResult, error) {
+	if _, err := exec.LookPath(e.command); err != nil {
 		return nil, err
 	}
 
@@ -103,16 +113,42 @@ func (e *Endpoint) run(ctx context.Context) ([]byte, error) {
 	}
 
 	// #nosec G204 // command and args come from trusted config
-	cmd := exec.CommandContext(ctx, e.cmd, e.args...)
+	cmd := exec.CommandContext(ctx, e.command, e.args...)
 
-	var out bytes.Buffer
+	var stdout, stderr bytes.Buffer
 
-	cmd.Stdout, cmd.Stderr = &out, &out
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
 	cmd.Env = e.env
 
-	if err := cmd.Run(); err != nil {
-		return nil, err
+	if e.UID != 0 || e.GID != 0 {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+		cmd.SysProcAttr.Credential = &syscall.Credential{
+			Uid: cmp.Or(e.UID, e.GID),
+			Gid: cmp.Or(e.GID, e.UID),
+		}
 	}
 
-	return out.Bytes(), nil
+	exitCode, execResult := 0, ExecResult{}
+
+	err := cmd.Run()
+	if err != nil {
+		execResult.Error = err.Error()
+
+		ee := &exec.ExitError{}
+		if errors.As(err, &ee) {
+			exitCode = ee.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	} else if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+
+	execResult.Stdout = stdout.String()
+	execResult.Stderr = stderr.String()
+	execResult.ExitCode = &exitCode
+
+	return &execResult, err
 }

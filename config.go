@@ -21,6 +21,8 @@ type Config struct {
 }
 
 func (c *Config) validate() error {
+	uid := os.Getuid()
+
 	if c.ListenAddr == "" {
 		return errors.New("listen_addr must not be empty")
 	}
@@ -29,13 +31,22 @@ func (c *Config) validate() error {
 		return fmt.Errorf("listen_addr must be host:port or :port: %w", err)
 	}
 
+	_, err := parseLogLevel(c.LogLevel)
+	if err != nil {
+		return fmt.Errorf("invalid log level: %w", err)
+	}
+
 	seen := make(map[string]struct{}, len(c.Endpoints))
 	for i, e := range c.Endpoints {
 		if err := e.validate(); err != nil {
 			return fmt.Errorf("endpoint[%d]: %w", i, err)
 		}
 
-		if e.Unsafe {
+		if (e.UID != 0 || e.GID != 0) && uid != 0 {
+			return fmt.Errorf("cannot set UID/GID for endpoint %q: must run as root to drop privileges (current uid=%d, requested uid=%d gid=%d)", e.Path, uid, e.UID, e.GID)
+		}
+
+		if e.NoAuth {
 			logger.Warn("endpoint registered without token protection (unsafe mode enabled)",
 				"path", e.Path,
 				"index", i,
@@ -85,7 +96,7 @@ func (c *Config) redact() *Config {
 
 func (c *Config) complete() {
 	for i := range c.Endpoints {
-		c.Endpoints[i].complete()
+		c.Endpoints[i].resolve()
 	}
 }
 
