@@ -19,6 +19,10 @@ func newSafeMap[K comparable, V any]() *safeMap[K, V] {
 	}
 }
 
+func (sf *safeMap[K, V]) len() int {
+	return len(sf.m)
+}
+
 func (sf *safeMap[K, V]) load(k K) (V, bool) {
 	sf.mu.RLock()
 	defer sf.mu.RUnlock()
@@ -40,6 +44,22 @@ func (sf *safeMap[K, V]) delete(k K) {
 	defer sf.mu.Unlock()
 
 	delete(sf.m, k)
+}
+
+func (sf *safeMap[K, V]) upsert(k K, f func(old V) V) {
+	sf.mu.Lock()
+	defer sf.mu.Unlock()
+
+	sf.m[k] = f(sf.m[k])
+}
+
+func (sf *safeMap[K, V]) safeRange(f func(k K, v V)) {
+	sf.mu.RLock()
+	defer sf.mu.RUnlock()
+
+	for k, v := range sf.m {
+		f(k, v)
+	}
 }
 
 func (sf *safeMap[K, V]) compact() {

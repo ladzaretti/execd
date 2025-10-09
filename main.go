@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -21,15 +22,38 @@ import (
 
 var Version = "v0.0.0"
 
-type execState string
+type execState int
 
 const (
-	execStateQueued    execState = "queued"
-	execStateRunning   execState = "running"
-	execStateCompleted execState = "completed"
-	execStateFailed    execState = "failed"
-	execStateCanceled  execState = "canceled"
+	_ execState = iota
+	execStateRunning
+	execStateQueued
+	execStateCompleted
+	execStateFailed
+	execStateCanceled
 )
+
+func (s execState) String() string {
+	switch s {
+	case execStateQueued:
+		return "queued"
+	case execStateRunning:
+		return "running"
+	case execStateCompleted:
+		return "completed"
+	case execStateFailed:
+		return "failed"
+	case execStateCanceled:
+		return "canceled"
+	default:
+		return "unknown"
+	}
+}
+
+//nolint:unparam
+func (s execState) MarshalText() ([]byte, error) {
+	return []byte(s.String()), nil
+}
 
 const (
 	defaultConfigName = ".execd.toml"
@@ -95,6 +119,61 @@ func mustInitialize() {
 }
 
 func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
+	type JobsSummary struct {
+		ID          string    `json:"id,omitempty"`
+		Path        string    `json:"path,omitempty"`
+		State       execState `json:"state,omitempty"`
+		ExitCode    *int      `json:"exit_code,omitempty"`
+		Error       string    `json:"error,omitempty"`
+		StartedAt   time.Time `json:"started_at,omitzero"`
+		CompletedAt time.Time `json:"completed_at,omitzero"`
+	}
+
+	compare := func(a, b JobsSummary) int {
+		if a.State != b.State {
+			return cmp.Compare(int(a.State), int(b.State))
+		}
+
+		// descending order
+		switch {
+		case a.StartedAt.After(b.StartedAt):
+			return -1
+		case a.StartedAt.Before(b.StartedAt):
+			return 1
+		default:
+			return 0
+		}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		summary := make([]JobsSummary, 0, jobs.len())
+
+		jobs.safeRange(func(k string, v RequestState) {
+			summary = append(summary, JobsSummary{
+				ID:          k,
+				Path:        v.Path,
+				State:       v.State,
+				ExitCode:    v.Result.ExitCode,
+				Error:       v.Result.Error,
+				StartedAt:   v.StartedAt,
+				CompletedAt: v.CompletedAt,
+			})
+		})
+
+		slices.SortFunc(summary, compare)
+
+		writeJSON(w, http.StatusOK, summary)
+	})
+}
+
+func newJobHandler(jobs *safeMap[string, RequestState]) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "" {
@@ -148,7 +227,9 @@ func newExecHandler(appCtx context.Context, e Endpoint, jobs *safeMap[string, Re
 		id := v
 
 		jobs.store(id, RequestState{
-			State: execStateQueued,
+			State:     execStateQueued,
+			StartedAt: time.Now(),
+			Path:      e.Path,
 		})
 
 		w.Header().Set("Location", "/jobs/"+id)
@@ -164,16 +245,17 @@ func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestSt
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	jobs.store(id, RequestState{
-		State:  execStateRunning,
-		cancel: cancel,
+	jobs.upsert(id, func(old RequestState) RequestState {
+		old.State, old.cancel = execStateRunning, cancel
+		return old
 	})
 
 	execResult, runErr := e.run(ctx)
 
 	completed := RequestState{
-		State:  execStateCompleted,
-		cancel: nil,
+		State:       execStateCompleted,
+		CompletedAt: time.Now(),
+		cancel:      nil,
 	}
 
 	if execResult != nil {
@@ -188,7 +270,12 @@ func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestSt
 		completed.State = execStateFailed
 	}
 
-	jobs.store(id, completed)
+	jobs.upsert(id, func(old RequestState) RequestState {
+		completed.Path = old.Path
+		completed.StartedAt = old.StartedAt
+
+		return completed
+	})
 
 	go deleteJobAfter(ctx, jobs, id, 60*time.Minute)
 }
@@ -211,31 +298,33 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-func withAuthMiddleware(token string, unsafe bool, h http.Handler) http.Handler {
+func withAuth(token string, unsafe bool) func(h http.Handler) http.Handler {
 	const bearer = "Bearer "
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodOptions, unsafe:
+	return func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodOptions, unsafe:
+				h.ServeHTTP(w, r)
+				return
+			default:
+			}
+
+			auth := r.Header.Get("Authorization")
+			if len(auth) < len(bearer) || !strings.EqualFold(auth[:len(bearer)], bearer) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			got, want := []byte(auth[len(bearer):]), []byte(token)
+			if subtle.ConstantTimeCompare(got, want) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+
 			h.ServeHTTP(w, r)
-			return
-		default:
-		}
-
-		auth := r.Header.Get("Authorization")
-		if len(auth) < len(bearer) || !strings.EqualFold(auth[:len(bearer)], bearer) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		got, want := []byte(auth[len(bearer):]), []byte(token)
-		if subtle.ConstantTimeCompare(got, want) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		h.ServeHTTP(w, r)
-	})
+		})
+	}
 }
 
 func withCORS(h http.Handler) http.Handler {
@@ -288,7 +377,7 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func withTracingMiddleware(h http.Handler) http.Handler {
+func withTracing(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-Id")
 		if id == "" {
@@ -320,10 +409,21 @@ func withTracingMiddleware(h http.Handler) http.Handler {
 	})
 }
 
+func chain(h http.Handler, middlewares ...func(h http.Handler) http.Handler) http.Handler {
+	for _, m := range middlewares {
+		h = m(h)
+	}
+
+	return h
+}
+
 type RequestState struct {
-	State  execState  `json:"state,omitempty"`
-	Result ExecResult `json:"result"`
-	cancel func()
+	Path        string     `json:"path,omitempty"`
+	State       execState  `json:"state,omitempty"`
+	Result      ExecResult `json:"result"`
+	StartedAt   time.Time  `json:"started_at,omitzero"`
+	CompletedAt time.Time  `json:"completed_at,omitzero"`
+	cancel      func()
 }
 
 func main() {
@@ -338,19 +438,22 @@ func main() {
 
 	for _, e := range config.Endpoints {
 		h, token := newExecHandler(ctx, e, execResults), cmp.Or(e.Token, config.Token)
-
-		h = withAuthMiddleware(token, e.NoAuth, h)
-		h = withCORS(h)
-		h = withTracingMiddleware(h)
-
-		mux.Handle(e.Path, h)
+		mux.Handle(e.Path, chain(h,
+			withAuth(token, e.NoAuth),
+			withCORS,
+			withTracing,
+		))
 	}
 
-	js := newJobsHandler(execResults)
-	js = withCORS(js)
-	js = withTracingMiddleware(js)
+	mux.Handle("/jobs/{id}", chain(newJobHandler(execResults),
+		withCORS,
+		withTracing,
+	))
 
-	mux.Handle("/jobs/{id}", js)
+	mux.Handle("/jobs", chain(newJobsHandler(execResults),
+		withCORS,
+		withTracing,
+	))
 
 	srv := &http.Server{
 		Addr:              config.ListenAddr,
@@ -371,10 +474,10 @@ func main() {
 
 	logger.Info("server signaled")
 
-	ctxShutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctxShutdown); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server shutdown error", "err", err)
 	}
 
