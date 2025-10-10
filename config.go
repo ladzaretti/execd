@@ -115,8 +115,8 @@ func parseFileConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: stat file: %w", err)
 	}
 
-	if (fi.Mode().Perm() & 0o022) != 0 {
-		logger.Warn("config file is writable by others", "path", path)
+	if fi.Mode().Perm() != 0o600 {
+		return nil, fmt.Errorf("config: %q has invalid permissions: got %04o, expected 0600", path, fi.Mode().Perm())
 	}
 
 	raw, err := os.ReadFile(filepath.Clean(path))
