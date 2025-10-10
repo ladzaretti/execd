@@ -123,6 +123,8 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 		ID          string    `json:"id,omitempty"`
 		Path        string    `json:"path,omitempty"`
 		State       execState `json:"state,omitempty"`
+		Detached    bool      `json:"detached,omitempty"`
+		PID         int       `json:"pid,omitempty"`
 		ExitCode    *int      `json:"exit_code,omitempty"`
 		Error       string    `json:"error,omitempty"`
 		StartedAt   time.Time `json:"started_at,omitzero"`
@@ -160,6 +162,8 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 				ID:          k,
 				Path:        v.Path,
 				State:       v.State,
+				Detached:    v.Result.Detached,
+				PID:         v.Result.PID,
 				ExitCode:    v.Result.ExitCode,
 				Error:       v.Result.Error,
 				StartedAt:   v.StartedAt,
@@ -250,7 +254,7 @@ func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestSt
 		return old
 	})
 
-	execResult, runErr := e.run(ctx)
+	execResult := e.run(ctx)
 
 	completed := RequestState{
 		State:       execStateCompleted,
@@ -262,11 +266,7 @@ func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestSt
 		completed.Result = *execResult
 	}
 
-	if runErr != nil {
-		completed.State = execStateFailed
-	}
-
-	if execResult.ExitCode != nil && *execResult.ExitCode != 0 {
+	if execResult.Error != "" || (execResult.ExitCode != nil && *execResult.ExitCode != 0) {
 		completed.State = execStateFailed
 	}
 

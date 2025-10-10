@@ -24,15 +24,16 @@ type resolvedEndpoint struct {
 }
 
 type Endpoint struct {
-	Path    string   `json:"path,omitempty"    toml:"path,commented"`
-	Token   string   `json:"token,omitempty"   toml:"token,commented"`
-	Method  string   `json:"method,omitempty"  toml:"method,commented"`
-	Cmd     []string `json:"cmd,omitempty"     toml:"cmd,commented"`
-	Env     []string `json:"env,omitempty"     toml:"env,commented"`
-	UID     uint32   `json:"uid,omitempty"     toml:"uid,commented"`
-	GID     uint32   `json:"gid,omitempty"     toml:"gid,commented"`
-	Timeout string   `json:"timeout,omitempty" toml:"timeout,commented"`
-	NoAuth  bool     `json:"no_auth,omitempty" toml:"no_auth,commented"`
+	Path     string   `json:"path,omitempty"     toml:"path,commented"`
+	Token    string   `json:"token,omitempty"    toml:"token,commented"`
+	Method   string   `json:"method,omitempty"   toml:"method,commented"`
+	Cmd      []string `json:"cmd,omitempty"      toml:"cmd,commented"`
+	Env      []string `json:"env,omitempty"      toml:"env,commented"`
+	Detached bool     `json:"detached,omitempty" toml:"detached,commented"`
+	UID      uint32   `json:"uid,omitempty"      toml:"uid,commented"`
+	GID      uint32   `json:"gid,omitempty"      toml:"gid,commented"`
+	Timeout  string   `json:"timeout,omitempty"  toml:"timeout,commented"`
+	NoAuth   bool     `json:"no_auth,omitempty"  toml:"no_auth,commented"`
 
 	resolvedEndpoint
 }
@@ -44,6 +45,10 @@ func (e *Endpoint) validate() error {
 
 	if e.Method != "" && !slices.Contains(allowedHTTPMethods, strings.ToUpper(e.Method)) {
 		return fmt.Errorf("unsupported method %q for path %q", e.Method, e.Path)
+	}
+
+	if e.Detached && e.Timeout != "" {
+		return errors.New("timeout cannot be used when running in detached mode")
 	}
 
 	if e.Timeout != "" {
@@ -96,15 +101,21 @@ func (e *Endpoint) redact() Endpoint {
 type ExecResult struct {
 	Stdout   string `json:"stdout,omitempty"`
 	Stderr   string `json:"stderr,omitempty"`
+	Detached bool   `json:"detached,omitempty"`
+	PID      int    `json:"pid,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 
-func (e *Endpoint) run(ctx context.Context) (*ExecResult, error) {
-	if _, err := exec.LookPath(e.command); err != nil {
-		return nil, err
+func (e *Endpoint) run(ctx context.Context) *ExecResult {
+	if e.Detached {
+		return e.runDetached()
 	}
 
+	return e.runWait(ctx)
+}
+
+func (e *Endpoint) runWait(ctx context.Context) *ExecResult {
 	if e.timeout != 0 {
 		c, cancel := context.WithTimeout(ctx, e.timeout)
 		ctx = c
@@ -125,22 +136,20 @@ func (e *Endpoint) run(ctx context.Context) (*ExecResult, error) {
 	if e.UID != 0 || e.GID != 0 {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 		cmd.SysProcAttr.Credential = &syscall.Credential{
-			Uid: cmp.Or(e.UID, e.GID),
-			Gid: cmp.Or(e.GID, e.UID),
+			Uid: e.UID,
+			Gid: e.GID,
 		}
 	}
 
-	exitCode, execResult := 0, ExecResult{}
+	exitCode, execResult := -1, ExecResult{}
 
 	err := cmd.Run()
 	if err != nil {
 		execResult.Error = err.Error()
 
-		ee := &exec.ExitError{}
+		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			exitCode = ee.ExitCode()
-		} else {
-			exitCode = -1
 		}
 	} else if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
@@ -150,5 +159,40 @@ func (e *Endpoint) run(ctx context.Context) (*ExecResult, error) {
 	execResult.Stderr = stderr.String()
 	execResult.ExitCode = &exitCode
 
-	return &execResult, err
+	return &execResult
+}
+
+func (e *Endpoint) runDetached() *ExecResult {
+	cmd := exec.Command(e.command, e.args...) //nolint:gosec,noctx // command and args come from trusted config // noctx is intentional
+	cmd.Env = e.env
+
+	if f, err := os.OpenFile("/dev/null", os.O_WRONLY, 0); err == nil {
+		cmd.Stdout, cmd.Stderr, cmd.Stdin = f, f, nil
+	} else {
+		cmd.Stdout, cmd.Stderr, cmd.Stdin = nil, nil, nil
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true,
+	}
+
+	if e.UID != 0 || e.GID != 0 {
+		cmd.SysProcAttr.Credential = &syscall.Credential{
+			Uid: e.UID,
+			Gid: e.GID,
+		}
+	}
+
+	err := cmd.Start()
+	if err != nil {
+		return &ExecResult{Error: err.Error()}
+	}
+
+	// reap so it never zombies
+	go func() { _ = cmd.Wait() }()
+
+	return &ExecResult{
+		Detached: true,
+		PID:      cmd.Process.Pid,
+	}
 }
