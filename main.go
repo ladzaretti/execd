@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/subtle"
@@ -16,44 +17,22 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 )
 
 var Version = "v0.0.0"
 
-type execState int
+type execState string
 
 const (
-	_ execState = iota
-	execStateRunning
-	execStateQueued
-	execStateCompleted
-	execStateFailed
-	execStateCanceled
+	execStateRunning   execState = "running"
+	execStateQueued    execState = "queued"
+	execStateCompleted execState = "completed"
+	execStateFailed    execState = "failed"
+	execStateCanceled  execState = "canceled"
 )
-
-func (s execState) String() string {
-	switch s {
-	case execStateQueued:
-		return "queued"
-	case execStateRunning:
-		return "running"
-	case execStateCompleted:
-		return "completed"
-	case execStateFailed:
-		return "failed"
-	case execStateCanceled:
-		return "canceled"
-	default:
-		return "unknown"
-	}
-}
-
-//nolint:unparam
-func (s execState) MarshalText() ([]byte, error) {
-	return []byte(s.String()), nil
-}
 
 const (
 	defaultConfigName = ".execd.toml"
@@ -131,22 +110,6 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 		CompletedAt time.Time `json:"completed_at,omitzero"`
 	}
 
-	compare := func(a, b JobsSummary) int {
-		if a.State != b.State {
-			return cmp.Compare(int(a.State), int(b.State))
-		}
-
-		// descending order
-		switch {
-		case a.StartedAt.After(b.StartedAt):
-			return -1
-		case a.StartedAt.Before(b.StartedAt):
-			return 1
-		default:
-			return 0
-		}
-	}
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -171,7 +134,9 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 			})
 		})
 
-		slices.SortFunc(summary, compare)
+		slices.SortFunc(summary, func(a, b JobsSummary) int {
+			return a.StartedAt.Compare(b.StartedAt)
+		})
 
 		writeJSON(w, http.StatusOK, summary)
 	})
@@ -212,6 +177,35 @@ func newJobHandler(jobs *safeMap[string, RequestState]) http.Handler {
 	})
 }
 
+func toEnvKey(s string) (key string) {
+	buf := &bytes.Buffer{}
+
+	for i, r := range s {
+		if unicode.IsUpper(r) && i > 0 {
+			buf.WriteRune('_')
+		}
+
+		buf.WriteRune(unicode.ToUpper(r))
+	}
+
+	return buf.String()
+}
+
+func paramsToEnv(r *http.Request, pathParams []string) []string {
+	params := r.URL.Query()
+	env := make([]string, 0, len(params)+len(pathParams))
+
+	for k, v := range params {
+		env = append(env, toEnvKey(k)+"="+strings.Join(v, " "))
+	}
+
+	for _, k := range pathParams {
+		env = append(env, toEnvKey(k)+"="+r.PathValue(k))
+	}
+
+	return env
+}
+
 func newExecHandler(appCtx context.Context, e Endpoint, jobs *safeMap[string, RequestState]) http.Handler {
 	method := strings.ToUpper(e.method)
 
@@ -241,11 +235,11 @@ func newExecHandler(appCtx context.Context, e Endpoint, jobs *safeMap[string, Re
 			ID string `json:"id,omitempty"`
 		}{ID: id})
 
-		go runRequest(appCtx, e, jobs, id)
+		go runRequest(appCtx, e, jobs, id, paramsToEnv(r, e.pathParams))
 	})
 }
 
-func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestState], id string) {
+func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestState], id string, env []string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -254,7 +248,7 @@ func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestSt
 		return old
 	})
 
-	execResult := e.run(ctx)
+	execResult := e.run(ctx, env)
 
 	completed := RequestState{
 		State:       execStateCompleted,

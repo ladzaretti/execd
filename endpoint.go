@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -16,24 +17,25 @@ import (
 )
 
 type resolvedEndpoint struct {
-	method  string
-	command string
-	args    []string
-	env     []string
-	timeout time.Duration
+	method     string
+	command    string
+	args       []string
+	env        []string
+	timeout    time.Duration
+	pathParams []string
 }
 
 type Endpoint struct {
-	Path     string   `json:"path,omitempty"     toml:"path,commented"`
-	Token    string   `json:"token,omitempty"    toml:"token,commented"`
-	Method   string   `json:"method,omitempty"   toml:"method,commented"`
-	Cmd      []string `json:"cmd,omitempty"      toml:"cmd,commented"`
-	Env      []string `json:"env,omitempty"      toml:"env,commented"`
-	Detached bool     `json:"detached,omitempty" toml:"detached,commented"`
-	UID      uint32   `json:"uid,omitempty"      toml:"uid,commented"`
-	GID      uint32   `json:"gid,omitempty"      toml:"gid,commented"`
-	Timeout  string   `json:"timeout,omitempty"  toml:"timeout,commented"`
-	NoAuth   bool     `json:"no_auth,omitempty"  toml:"no_auth,commented"`
+	Path         string   `json:"path,omitempty"          toml:"path,commented"`
+	Token        string   `json:"token,omitempty"         toml:"token,commented"`
+	Method       string   `json:"method,omitempty"        toml:"method,commented"`
+	Cmd          []string `json:"cmd,omitempty"           toml:"cmd,commented"`
+	EnvAllowlist []string `json:"env_allowlist,omitempty" toml:"env_allowlist,commented"`
+	Detached     bool     `json:"detached,omitempty"      toml:"detached,commented"`
+	UID          uint32   `json:"uid,omitempty"           toml:"uid,commented"`
+	GID          uint32   `json:"gid,omitempty"           toml:"gid,commented"`
+	Timeout      string   `json:"timeout,omitempty"       toml:"timeout,commented"`
+	NoAuth       bool     `json:"no_auth,omitempty"       toml:"no_auth,commented"`
 
 	resolvedEndpoint
 }
@@ -72,18 +74,27 @@ func (e *Endpoint) validate() error {
 	return nil
 }
 
+var re = regexp.MustCompile(`{([^{}]*)}`)
+
 func (e *Endpoint) resolve() {
 	e.method = cmp.Or(e.Method, http.MethodPost)
 	e.command, e.args = e.Cmd[0], e.Cmd[1:]
 
-	e.env = make([]string, 0, len(e.Env))
-	for _, key := range e.Env {
-		e.env = append(e.env, key, os.Getenv(key))
+	e.env = make([]string, 0, len(e.EnvAllowlist))
+	for _, key := range e.EnvAllowlist {
+		e.env = append(e.env, key+"="+os.Getenv(key))
 	}
 
 	if e.Timeout != "" {
 		t, _ := time.ParseDuration(e.Timeout) // validated at [Endpoint.validate]
 		e.timeout = t
+	}
+
+	e.pathParams = make([]string, 0, 4)
+
+	matches := re.FindAllStringSubmatch(e.Path, -1)
+	for _, v := range matches {
+		e.pathParams = append(e.pathParams, v[1])
 	}
 }
 
@@ -107,15 +118,15 @@ type ExecResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
-func (e *Endpoint) run(ctx context.Context) *ExecResult {
+func (e *Endpoint) run(ctx context.Context, env []string) *ExecResult {
 	if e.Detached {
-		return e.runDetached()
+		return e.runDetached(env)
 	}
 
-	return e.runWait(ctx)
+	return e.runWait(ctx, env)
 }
 
-func (e *Endpoint) runWait(ctx context.Context) *ExecResult {
+func (e *Endpoint) runWait(ctx context.Context, env []string) *ExecResult {
 	if e.timeout != 0 {
 		c, cancel := context.WithTimeout(ctx, e.timeout)
 		ctx = c
@@ -131,7 +142,7 @@ func (e *Endpoint) runWait(ctx context.Context) *ExecResult {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	cmd.Env = e.env
+	cmd.Env = slices.Concat(e.env, env)
 
 	if e.UID != 0 || e.GID != 0 {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
@@ -162,9 +173,9 @@ func (e *Endpoint) runWait(ctx context.Context) *ExecResult {
 	return &execResult
 }
 
-func (e *Endpoint) runDetached() *ExecResult {
+func (e *Endpoint) runDetached(env []string) *ExecResult {
 	cmd := exec.Command(e.command, e.args...) //nolint:gosec,noctx // command and args come from trusted config // noctx is intentional
-	cmd.Env = e.env
+	cmd.Env = slices.Concat(e.env, env)
 
 	if f, err := os.OpenFile("/dev/null", os.O_WRONLY, 0); err == nil {
 		cmd.Stdout, cmd.Stderr, cmd.Stdin = f, f, nil
