@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -110,6 +111,65 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 		CompletedAt time.Time `json:"completed_at,omitzero"`
 	}
 
+	allowedFilters := []string{
+		string(execStateRunning),
+		string(execStateQueued),
+		string(execStateCompleted),
+		string(execStateFailed),
+		string(execStateCanceled),
+	}
+
+	validateFilters := func(filters []string) bool {
+		if len(filters) == 0 {
+			return true
+		}
+
+		for _, f := range filters {
+			if !slices.Contains(allowedFilters, strings.ToLower(f)) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	paginate := func(w http.ResponseWriter, r *http.Request, summary []JobsSummary, cursor string, limit int) {
+		start := slices.IndexFunc(summary, func(e JobsSummary) bool {
+			return cursor == "" || e.ID == cursor // no cursor means serve first page
+		})
+
+		if start == -1 {
+			http.Error(w, "cursor does not exists", http.StatusBadRequest)
+
+			return
+		}
+
+		end := min(start+limit, len(summary))
+
+		page := summary[start:end]
+
+		if end < len(summary) {
+			nextCursor := summary[end].ID
+
+			u := *r.URL
+			q := u.Query()
+			q.Set("cursor", nextCursor)
+			q.Set("limit", strconv.Itoa(limit))
+			u.RawQuery = q.Encode()
+
+			scheme := "http"
+			if r.TLS != nil {
+				scheme = "https"
+			}
+
+			u.Scheme, u.Host = scheme, r.Host
+
+			w.Header().Set("Link", fmt.Sprintf("<%s>; rel=\"next\"", u.String()))
+		}
+
+		writeJSON(w, http.StatusOK, page)
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -119,8 +179,27 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 		}
 
 		summary := make([]JobsSummary, 0, jobs.len())
+		filters := make([]string, 0, len(allowedFilters))
+
+		for _, s := range r.URL.Query()["filter"] {
+			filters = append(filters, strings.Split(s, ",")...)
+		}
+
+		if !validateFilters(filters) {
+			http.Error(
+				w,
+				"allowed filters: "+strings.Join(allowedFilters, ","),
+				http.StatusBadRequest,
+			)
+
+			return
+		}
 
 		jobs.safeRange(func(k string, v RequestState) {
+			if len(filters) > 0 && !slices.Contains(filters, string(v.State)) {
+				return
+			}
+
 			summary = append(summary, JobsSummary{
 				ID:          k,
 				Path:        v.Path,
@@ -135,10 +214,28 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 		})
 
 		slices.SortFunc(summary, func(a, b JobsSummary) int {
-			return a.StartedAt.Compare(b.StartedAt)
+			return b.StartedAt.Compare(a.StartedAt) // descent
 		})
 
-		writeJSON(w, http.StatusOK, summary)
+		var (
+			limit  = r.URL.Query().Get("limit")
+			cursor = r.URL.Query().Get("cursor")
+		)
+
+		if limit == "" {
+			writeJSON(w, http.StatusOK, summary)
+
+			return
+		}
+
+		l, err := strconv.Atoi(limit)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid limit: %s", err), http.StatusBadRequest)
+
+			return
+		}
+
+		paginate(w, r, summary, cursor, l)
 	})
 }
 
