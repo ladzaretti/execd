@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -646,25 +647,52 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	go func() {
-		logger.Info("server listening", "addr", config.ListenAddr)
+	lc := net.ListenConfig{}
 
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server error", "err", err)
-		}
+	l, err := lc.Listen(ctx, "tcp", config.ListenAddr)
+	if err != nil {
+		logger.Error("listen failed", "addr", config.ListenAddr, "err", err)
+		os.Exit(1)
+	}
+
+	logger.Info("server listening", "addr", l.Addr().String())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Serve(l)
+		close(errCh)
 	}()
 
-	<-ctx.Done()
+	var serveErr error
+
+	select {
+	case <-ctx.Done():
+		logger.Info("server signaled")
+
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("server terminated due to internal error", "err", err)
+		}
+
+		serveErr = err
+	}
+
 	cancel()
 
-	logger.Info("server signaled")
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server shutdown error", "err", err)
 	}
 
+	shutdownCancel()
+
+	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error("server exit error", "err", err)
+	}
+
 	logger.Info("server stopped")
+
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		os.Exit(1)
+	}
 }
