@@ -18,6 +18,8 @@ type Config struct {
 	Token      string     `json:"token,omitempty"       toml:"token,commented"`
 	ListenAddr string     `json:"listen_addr,omitempty" toml:"listen_addr,commented"`
 	Endpoints  []Endpoint `json:"endpoints,omitempty"   toml:"endpoints,commented"`
+
+	sha string
 }
 
 func (c *Config) validate() error {

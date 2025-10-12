@@ -26,6 +26,7 @@ type resolvedEndpoint struct {
 }
 
 type Endpoint struct {
+	Summary      string   `json:"summary,omitempty"       toml:"summary,commented"`
 	Path         string   `json:"path,omitempty"          toml:"path,commented"`
 	Token        string   `json:"token,omitempty"         toml:"token,commented"`
 	Method       string   `json:"method,omitempty"        toml:"method,commented"`

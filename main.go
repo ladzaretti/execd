@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,25 +81,54 @@ func mustInitialize() {
 	configPath := flag.String("config", "", "config file path")
 	flag.Parse()
 
-	defaultPath, err := defaultConfigPath()
-	if err != nil {
-		panic(err)
-	}
+	if *configPath == "" {
+		defaultPath, err := defaultConfigPath()
+		if err != nil {
+			logger.Error("resolve default config path", "err", err)
+			os.Exit(1)
+		}
 
-	*configPath = cmp.Or(*configPath, defaultPath)
+		*configPath = defaultPath
+	}
 
 	c, err := loadFileConfig(*configPath)
 	if err != nil {
-		logger.Error("invalid config", "err", err)
+		logger.Error("open config file", "path", *configPath, "err", err)
 		os.Exit(1)
 	}
 
-	l, _ := parseLogLevel(c.LogLevel) //  already validated during config parsing
+	sha, err := hash(*configPath)
+	if err != nil {
+		logger.Error("hash config file", "path", *configPath, "err", err)
+		os.Exit(1)
+	}
+
+	c.sha = sha
+
+	logger.Info("config sha256", "sha", c.sha)
+
+	l, _ := parseLogLevel(c.LogLevel) // already validated during config parsing
 
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l}))
 	logger.Info("resolved config", "path", configPath, "config", c.redact())
 
 	config = c
+}
+
+func hash(filename string) (string, error) {
+	f, err := os.Open(path.Clean(filename))
+	if err != nil {
+		return "", nil
+	}
+
+	defer func() { _ = f.Close() }()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", nil
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
@@ -371,6 +404,50 @@ func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestSt
 	go deleteJobAfter(ctx, jobs, id, 60*time.Minute)
 }
 
+func newRoutesHandler(es []Endpoint) http.Handler {
+	type route struct {
+		Summary string   `json:"summary,omitempty"`
+		Path    string   `json:"path,omitempty"`
+		Cmd     []string `json:"cmd,omitempty"`
+		Timeout string   `json:"timeout,omitempty"`
+		Auth    bool     `json:"requires_auth"`
+	}
+
+	routes := make([]route, len(es))
+
+	for i, e := range es {
+		routes[i] = route{
+			Summary: e.Summary,
+			Path:    fmt.Sprintf("%s %s", strings.ToUpper(e.method), e.Path),
+			Cmd:     e.Cmd,
+			Timeout: e.Timeout,
+			Auth:    !e.NoAuth,
+		}
+	}
+
+	payload, err := json.Marshal(routes)
+	if err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "failed to marshal routes", http.StatusInternalServerError)
+		})
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+
+			if r.Method == http.MethodGet {
+				_, _ = w.Write(payload)
+			}
+		default:
+			w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+}
+
 func deleteJobAfter(ctx context.Context, jobs *safeMap[string, RequestState], id string, after time.Duration) {
 	select {
 	case <-time.After(after):
@@ -389,16 +466,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-func withAuth(token string, unsafe bool) func(h http.Handler) http.Handler {
+func withAuth(token string, unsafe bool) func(h http.Handler) http.Handler { //nolint:revive //unused-parameter
 	const bearer = "Bearer "
 
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.Method == http.MethodOptions, unsafe:
+			if r.Method == http.MethodOptions || unsafe {
 				h.ServeHTTP(w, r)
 				return
-			default:
 			}
 
 			auth := r.Header.Get("Authorization")
@@ -469,8 +544,10 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 }
 
 func withTracing(h http.Handler) http.Handler {
+	const hdrRequestID = "X-Request-Id"
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-Id")
+		id := r.Header.Get(hdrRequestID)
 		if id == "" {
 			id = uuid.NewString()
 		}
@@ -478,7 +555,7 @@ func withTracing(h http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), requestKey, id)
 
 		sw := &statusWriter{ResponseWriter: w}
-		sw.Header().Set("X-Request-Id", id)
+		sw.Header().Set(hdrRequestID, id)
 
 		logger.Debug("request received",
 			"id", id,
@@ -497,6 +574,20 @@ func withTracing(h http.Handler) http.Handler {
 		}(time.Now())
 
 		h.ServeHTTP(sw, r.WithContext(ctx))
+	})
+}
+
+func withMeta(h http.Handler) http.Handler {
+	const (
+		hdrConfigSHA = "X-Config-SHA"
+		hdrVersion   = "X-Execd-Version"
+	)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(hdrConfigSHA, config.sha)
+		w.Header().Set(hdrVersion, Version)
+
+		h.ServeHTTP(w, r)
 	})
 }
 
@@ -531,17 +622,26 @@ func main() {
 		h, token := newExecHandler(ctx, e, execResults), cmp.Or(e.Token, config.Token)
 		mux.Handle(e.Path, chain(h,
 			withAuth(token, e.NoAuth),
+			withMeta,
 			withCORS,
 			withTracing,
 		))
 	}
 
 	mux.Handle("/jobs/{id}", chain(newJobHandler(execResults),
+		withMeta,
 		withCORS,
 		withTracing,
 	))
 
 	mux.Handle("/jobs", chain(newJobsHandler(execResults),
+		withMeta,
+		withCORS,
+		withTracing,
+	))
+
+	mux.Handle("/routes", chain(newRoutesHandler(config.Endpoints),
+		withMeta,
 		withCORS,
 		withTracing,
 	))
