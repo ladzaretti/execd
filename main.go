@@ -40,6 +40,7 @@ const (
 )
 
 const (
+	defaultUserPrefix = "/exec"
 	defaultConfigName = ".execd.toml"
 	defaultListenAddr = ":8081"
 	redact            = "*****"
@@ -337,16 +338,7 @@ func paramsToEnv(r *http.Request, pathParams []string) []string {
 }
 
 func newExecHandler(appCtx context.Context, e Endpoint, jobs *safeMap[string, RequestState]) http.Handler {
-	method := strings.ToUpper(e.method)
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != method {
-			w.Header().Set("Allow", method)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-
-			return
-		}
-
 		v, ok := r.Context().Value(requestKey).(string)
 		if !ok {
 			v = ""
@@ -418,7 +410,11 @@ func newRoutesHandler(es []Endpoint) http.Handler {
 	for i, e := range es {
 		routes[i] = route{
 			Summary: e.Summary,
-			Path:    fmt.Sprintf("%s %s", strings.ToUpper(e.method), e.Path),
+			Path: fmt.Sprintf(
+				"%s %s",
+				strings.ToUpper(e.method),
+				path.Join(defaultUserPrefix, e.Path),
+			),
 			Cmd:     e.Cmd,
 			Timeout: e.Timeout,
 			Auth:    !e.NoAuth,
@@ -432,19 +428,11 @@ func newRoutesHandler(es []Endpoint) http.Handler {
 		})
 	}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead:
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 
-			if r.Method == http.MethodGet {
-				_, _ = w.Write(payload)
-			}
-		default:
-			w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
+		_, _ = w.Write(payload)
 	})
 }
 
@@ -579,7 +567,7 @@ func withTracing(h http.Handler) http.Handler {
 
 func withMeta(h http.Handler) http.Handler {
 	const (
-		hdrConfigSHA = "X-Config-SHA"
+		hdrConfigSHA = "X-Config-Sha"
 		hdrVersion   = "X-Execd-Version"
 	)
 
@@ -620,7 +608,13 @@ func main() {
 
 	for _, e := range config.Endpoints {
 		h, token := newExecHandler(ctx, e, execResults), cmp.Or(e.Token, config.Token)
-		mux.Handle(e.Path, chain(h,
+		pattern := fmt.Sprintf(
+			"%s %s",
+			strings.ToUpper(e.method),
+			path.Join(defaultUserPrefix, e.Path),
+		)
+
+		mux.Handle(pattern, chain(h,
 			withAuth(token, e.NoAuth),
 			withMeta,
 			withCORS,
@@ -628,19 +622,19 @@ func main() {
 		))
 	}
 
-	mux.Handle("/jobs/{id}", chain(newJobHandler(execResults),
+	mux.Handle("GET /jobs/{id}", chain(newJobHandler(execResults),
 		withMeta,
 		withCORS,
 		withTracing,
 	))
 
-	mux.Handle("/jobs", chain(newJobsHandler(execResults),
+	mux.Handle("GET /jobs", chain(newJobsHandler(execResults),
 		withMeta,
 		withCORS,
 		withTracing,
 	))
 
-	mux.Handle("/routes", chain(newRoutesHandler(config.Endpoints),
+	mux.Handle("GET /user-routes", chain(newRoutesHandler(config.Endpoints),
 		withMeta,
 		withCORS,
 		withTracing,
