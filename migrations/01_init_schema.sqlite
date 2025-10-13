@@ -1,0 +1,14 @@
+CREATE TABLE
+    IF NOT EXISTS requests (
+        uuid TEXT PRIMARY, -- uuidV7
+        path TEXT NOT NULL,
+        state TEXT NOT NULL,
+        stdout TEXT,
+        stderr TEXT,
+        detached INTEGER DEFAULT 0,
+        pid INTEGER,
+        exit_code INTEGER,
+        error TEXT,
+        started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        completed_at TEXT
+    );

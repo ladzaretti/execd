@@ -14,12 +14,14 @@ import (
 )
 
 type Config struct {
-	LogLevel   string     `json:"log_level,omitempty"   toml:"log_level,commented"`
-	Token      string     `json:"token,omitempty"       toml:"token,commented"`
-	ListenAddr string     `json:"listen_addr,omitempty" toml:"listen_addr,commented"`
-	Endpoints  []Endpoint `json:"endpoints,omitempty"   toml:"endpoints,commented"`
+	LogLevel   string     `json:"log_level,omitempty"     toml:"log_level,commented"`
+	DBPath     string     `json:"database_path,omitempty" toml:"database_path,commented"`
+	Token      string     `json:"token,omitempty"         toml:"token,commented"`
+	ListenAddr string     `json:"listen_addr,omitempty"   toml:"listen_addr,commented"`
+	Endpoints  []Endpoint `json:"endpoints,omitempty"     toml:"endpoints,commented"`
 
-	sha string
+	configPath string
+	sha        string
 }
 
 func (c *Config) validate() error {
@@ -30,18 +32,18 @@ func (c *Config) validate() error {
 	}
 
 	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
-		return fmt.Errorf("listen_addr must be host:port or :port: %w", err)
+		return fmt.Errorf("listen_addr must be host:port or :port: %v", err)
 	}
 
 	_, err := parseLogLevel(c.LogLevel)
 	if err != nil {
-		return fmt.Errorf("invalid log level: %w", err)
+		return fmt.Errorf("invalid log level: %v", err)
 	}
 
 	seen := make(map[string]struct{}, len(c.Endpoints))
 	for i, e := range c.Endpoints {
 		if err := e.validate(); err != nil {
-			return fmt.Errorf("endpoint[%d]: %w", i, err)
+			return fmt.Errorf("endpoint[%d]: %v", i, err)
 		}
 
 		if (e.UID != 0 || e.GID != 0) && uid != 0 {
@@ -103,7 +105,7 @@ func (c *Config) complete() {
 }
 
 func defaultConfigPath() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
@@ -114,7 +116,7 @@ func defaultConfigPath() (string, error) {
 func parseFileConfig(path string) (*Config, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: stat file: %w", err)
+		return nil, fmt.Errorf("config: stat file: %v", err)
 	}
 
 	if fi.Mode().Perm() != 0o600 {
@@ -128,7 +130,7 @@ func parseFileConfig(path string) (*Config, error) {
 
 	var config Config
 	if err := toml.Unmarshal(raw, &config); err != nil {
-		return nil, fmt.Errorf("config: parse file: %w", err)
+		return nil, fmt.Errorf("config: parse file: %v", err)
 	}
 
 	return &config, nil
@@ -142,7 +144,7 @@ func loadFileConfig(path string) (*Config, error) {
 	c, err := parseFileConfig(path)
 	if err != nil {
 		if path != "" || !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("load config %s: %w", path, err)
+			return nil, fmt.Errorf("load config %s: %v", path, err)
 		}
 
 		c = &Config{}

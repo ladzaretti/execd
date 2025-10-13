@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,6 +28,7 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/ladzaretti/migrate"
 )
 
 var Version = "v0.0.0"
@@ -43,6 +46,8 @@ const (
 const (
 	defaultUserPrefix = "/exec"
 	defaultConfigName = ".execd.toml"
+	defaultCacheDir   = ".execd.d"
+	defaultDBFilename = "execd.sqlite"
 	defaultListenAddr = ":8081"
 	redact            = "*****"
 )
@@ -105,6 +110,7 @@ func mustInitialize() {
 		os.Exit(1)
 	}
 
+	c.configPath = *configPath
 	c.sha = sha
 
 	logger.Info("config sha256", "sha", c.sha)
@@ -538,7 +544,8 @@ func withTracing(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(hdrRequestID)
 		if id == "" {
-			id = uuid.NewString()
+			u, _ := uuid.NewV7()
+			id = u.String()
 		}
 
 		ctx := context.WithValue(r.Context(), requestKey, id)
@@ -597,6 +604,15 @@ type RequestState struct {
 	cancel      func()
 }
 
+var (
+	//go:embed migrations
+	embedFS    embed.FS
+	migrations = migrate.EmbeddedMigrations{
+		FS:   embedFS,
+		Path: "migrations",
+	}
+)
+
 func main() {
 	subcommands()
 
@@ -612,7 +628,7 @@ func main() {
 		pattern := fmt.Sprintf(
 			"%s %s",
 			strings.ToUpper(e.method),
-			path.Join(defaultUserPrefix, e.Path),
+			filepath.Join(defaultUserPrefix, e.Path),
 		)
 
 		mux.Handle(pattern, chain(h,
