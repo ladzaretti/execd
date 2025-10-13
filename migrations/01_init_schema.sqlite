@@ -1,6 +1,6 @@
 CREATE TABLE
     IF NOT EXISTS requests (
-        uuid TEXT PRIMARY, -- uuidV7
+        uuid TEXT PRIMARY KEY,
         path TEXT NOT NULL,
         state TEXT NOT NULL,
         stdout TEXT,
@@ -9,6 +9,6 @@ CREATE TABLE
         pid INTEGER,
         exit_code INTEGER,
         error TEXT,
-        started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        started_at TEXT DEFAULT (strftime ('%Y-%m-%d %H:%M:%f', 'now')),
         completed_at TEXT
     );

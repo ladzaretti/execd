@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,6 +54,7 @@ const (
 var (
 	logger             = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	config             *Config
+	execdb             *execDB
 	allowedHTTPMethods = []string{
 		http.MethodGet,
 		http.MethodPost,
@@ -121,6 +121,14 @@ func mustInitialize() {
 	logger.Info("resolved config", "path", configPath, "config", c.redact())
 
 	config = c
+
+	db, err := newExecDB(c.DBPath)
+	if err != nil {
+		logger.Error("exec db:", "err", err)
+		os.Exit(1)
+	}
+
+	execdb = db
 }
 
 func hash(filename string) (string, error) {
@@ -139,13 +147,13 @@ func hash(filename string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
+func newJobsHandler(cancelableJobs *safeMap[string, RequestStateWithCancel]) http.Handler {
 	type JobsSummary struct {
 		ID          string    `json:"id,omitempty"`
 		Path        string    `json:"path,omitempty"`
 		State       execState `json:"state,omitempty"`
 		Detached    bool      `json:"detached,omitempty"`
-		PID         int       `json:"pid,omitempty"`
+		PID         *int      `json:"pid,omitempty"`
 		ExitCode    *int      `json:"exit_code,omitempty"`
 		Error       string    `json:"error,omitempty"`
 		StartedAt   time.Time `json:"started_at,omitzero"`
@@ -219,7 +227,7 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 			return
 		}
 
-		summary := make([]JobsSummary, 0, jobs.len())
+		summary := make([]JobsSummary, 0, cancelableJobs.len())
 		filters := make([]string, 0, len(allowedFilters))
 
 		for _, s := range r.URL.Query()["filter"] {
@@ -236,7 +244,7 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 			return
 		}
 
-		jobs.safeRange(func(k string, v RequestState) {
+		cancelableJobs.safeRange(func(k string, v RequestStateWithCancel) {
 			if len(filters) > 0 && !slices.Contains(filters, string(v.State)) {
 				return
 			}
@@ -280,7 +288,7 @@ func newJobsHandler(jobs *safeMap[string, RequestState]) http.Handler {
 	})
 }
 
-func newJobHandler(jobs *safeMap[string, RequestState]) http.Handler {
+func newJobHandler(appCtx context.Context, cancelableJobs *safeMap[string, RequestStateWithCancel]) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "" {
@@ -288,7 +296,7 @@ func newJobHandler(jobs *safeMap[string, RequestState]) http.Handler {
 			return
 		}
 
-		job, ok := jobs.load(id)
+		job, ok := cancelableJobs.load(id)
 		if !ok {
 			http.Error(w, "job not found", http.StatusNotFound)
 			return
@@ -307,6 +315,10 @@ func newJobHandler(jobs *safeMap[string, RequestState]) http.Handler {
 			job.cancel()
 
 			w.WriteHeader(http.StatusNoContent)
+
+			if _, err := execdb.updateRequestState(appCtx, id, execStateCanceled); err != nil {
+				logger.Error("error persisting canceled request state", "err", err)
+			}
 
 		default:
 			w.Header().Set("Allow", "GET, DELETE")
@@ -344,7 +356,7 @@ func paramsToEnv(r *http.Request, pathParams []string) []string {
 	return env
 }
 
-func newExecHandler(appCtx context.Context, e Endpoint, jobs *safeMap[string, RequestState]) http.Handler {
+func newExecHandler(appCtx context.Context, e Endpoint, cancelableJobs *safeMap[string, RequestStateWithCancel]) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		v, ok := r.Context().Value(requestKey).(string)
 		if !ok {
@@ -353,33 +365,43 @@ func newExecHandler(appCtx context.Context, e Endpoint, jobs *safeMap[string, Re
 
 		id := v
 
-		jobs.store(id, RequestState{
-			State:     execStateQueued,
-			StartedAt: time.Now(),
-			Path:      e.Path,
-		})
-
 		w.Header().Set("Location", "/jobs/"+id)
 		writeJSON(w, http.StatusAccepted, struct {
 			ID string `json:"id,omitempty"`
 		}{ID: id})
 
-		go runRequest(appCtx, e, jobs, id, paramsToEnv(r, e.pathParams))
+		rs := RequestStateWithCancel{
+			State:     execStateQueued,
+			StartedAt: time.Now(),
+			Path:      e.path,
+		}
+
+		cancelableJobs.store(id, rs) // FIXME: remove, only store cancel func
+
+		if _, err := execdb.insertNewRequest(appCtx, id, rs); err != nil {
+			logger.Error("error saving new request to database", "err", err)
+		}
+
+		go runRequest(appCtx, e, cancelableJobs, id, paramsToEnv(r, e.pathParams))
 	})
 }
 
-func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestState], id string, env []string) {
+func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string, RequestStateWithCancel], id string, env []string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	jobs.upsert(id, func(old RequestState) RequestState {
+	cancelableJobs.upsert(id, func(old RequestStateWithCancel) RequestStateWithCancel {
 		old.State, old.cancel = execStateRunning, cancel
 		return old
 	})
 
+	if _, err := execdb.updateRequestState(ctx, id, execStateRunning); err != nil {
+		logger.Error("error persisting running request state", "err", err)
+	}
+
 	execResult := e.run(ctx, env)
 
-	completed := RequestState{
+	completed := RequestStateWithCancel{
 		State:       execStateCompleted,
 		CompletedAt: time.Now(),
 		cancel:      nil,
@@ -393,14 +415,18 @@ func runRequest(ctx context.Context, e Endpoint, jobs *safeMap[string, RequestSt
 		completed.State = execStateFailed
 	}
 
-	jobs.upsert(id, func(old RequestState) RequestState {
+	cancelableJobs.upsert(id, func(old RequestStateWithCancel) RequestStateWithCancel {
 		completed.Path = old.Path
 		completed.StartedAt = old.StartedAt
 
 		return completed
 	})
 
-	go deleteJobAfter(ctx, jobs, id, 60*time.Minute)
+	if _, err := execdb.completeRequest(ctx, id, completed); err != nil {
+		logger.Error("error persisting completed request data", "err", err)
+	}
+
+	cancelableJobs.delete(id)
 }
 
 func newRoutesHandler(es []Endpoint) http.Handler {
@@ -420,7 +446,7 @@ func newRoutesHandler(es []Endpoint) http.Handler {
 			Path: fmt.Sprintf(
 				"%s %s",
 				strings.ToUpper(e.method),
-				path.Join(defaultUserPrefix, e.Path),
+				path.Join(defaultUserPrefix, e.path),
 			),
 			Cmd:     e.Cmd,
 			Timeout: e.Timeout,
@@ -441,15 +467,6 @@ func newRoutesHandler(es []Endpoint) http.Handler {
 
 		_, _ = w.Write(payload)
 	})
-}
-
-func deleteJobAfter(ctx context.Context, jobs *safeMap[string, RequestState], id string, after time.Duration) {
-	select {
-	case <-time.After(after):
-		jobs.delete(id)
-	case <-ctx.Done():
-		return
-	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -596,11 +613,21 @@ func chain(h http.Handler, middlewares ...func(h http.Handler) http.Handler) htt
 }
 
 type RequestState struct {
+	UUID        string     `json:"uuid,omitempty"`
 	Path        string     `json:"path,omitempty"`
 	State       execState  `json:"state,omitempty"`
-	Result      ExecResult `json:"result"`
-	StartedAt   time.Time  `json:"started_at,omitzero"`
-	CompletedAt time.Time  `json:"completed_at,omitzero"`
+	Result      ExecResult `json:"result,omitempty"`
+	StartedAt   time.Time  `json:"started_at,omitzero,omitempty"`
+	CompletedAt time.Time  `json:"completed_at,omitzero,omitempty"`
+}
+
+// FIXME: remove
+type RequestStateWithCancel struct {
+	Path        string     `json:"path,omitempty"`
+	State       execState  `json:"state,omitempty"`
+	Result      ExecResult `json:"result,omitempty"`
+	StartedAt   time.Time  `json:"started_at,omitzero,omitempty"`
+	CompletedAt time.Time  `json:"completed_at,omitzero,omitempty"`
 	cancel      func()
 }
 
@@ -618,17 +645,17 @@ func main() {
 
 	mustInitialize()
 
-	mux, execResults := http.NewServeMux(), newSafeMap[string, RequestState]()
+	mux, cancelableJobs := http.NewServeMux(), newSafeMap[string, RequestStateWithCancel]()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
-	go execResults.periodicCompact(ctx, 60*time.Minute)
+	go cancelableJobs.periodicCompact(ctx, 60*time.Minute)
 
 	for _, e := range config.Endpoints {
-		h, token := newExecHandler(ctx, e, execResults), cmp.Or(e.Token, config.Token)
+		h, token := newExecHandler(ctx, e, cancelableJobs), cmp.Or(e.Token, config.Token)
 		pattern := fmt.Sprintf(
 			"%s %s",
 			strings.ToUpper(e.method),
-			filepath.Join(defaultUserPrefix, e.Path),
+			e.path,
 		)
 
 		mux.Handle(pattern, chain(h,
@@ -639,13 +666,13 @@ func main() {
 		))
 	}
 
-	mux.Handle("GET /jobs/{id}", chain(newJobHandler(execResults),
+	mux.Handle("GET /jobs/{id}", chain(newJobHandler(ctx, cancelableJobs),
 		withMeta,
 		withCORS,
 		withTracing,
 	))
 
-	mux.Handle("GET /jobs", chain(newJobsHandler(execResults),
+	mux.Handle("GET /jobs", chain(newJobsHandler(cancelableJobs),
 		withMeta,
 		withCORS,
 		withTracing,
@@ -674,10 +701,11 @@ func main() {
 	logger.Info("server listening", "addr", l.Addr().String())
 
 	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.Serve(l)
-		close(errCh)
-	}()
+	go func(ch chan error) {
+		ch <- srv.Serve(l)
+
+		close(ch)
+	}(errCh)
 
 	var serveErr error
 
@@ -694,6 +722,8 @@ func main() {
 	}
 
 	cancel()
+
+	_ = execdb.close()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := srv.Shutdown(shutdownCtx); err != nil {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -17,6 +18,7 @@ import (
 )
 
 type resolvedEndpoint struct {
+	path       string
 	method     string
 	command    string
 	args       []string
@@ -91,6 +93,7 @@ func (e *Endpoint) resolve() {
 		e.timeout = t
 	}
 
+	e.path = filepath.Join(defaultUserPrefix, e.Path)
 	e.pathParams = make([]string, 0, 4)
 
 	matches := re.FindAllStringSubmatch(e.Path, -1)
@@ -114,7 +117,7 @@ type ExecResult struct {
 	Stdout   string `json:"stdout,omitempty"`
 	Stderr   string `json:"stderr,omitempty"`
 	Detached bool   `json:"detached,omitempty"`
-	PID      int    `json:"pid,omitempty"`
+	PID      *int   `json:"pid,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
@@ -205,6 +208,6 @@ func (e *Endpoint) runDetached(env []string) *ExecResult {
 
 	return &ExecResult{
 		Detached: true,
-		PID:      cmd.Process.Pid,
+		PID:      &cmd.Process.Pid,
 	}
 }
