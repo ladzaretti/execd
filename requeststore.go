@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"errors"
 	"fmt"
 	"os"
@@ -15,12 +16,21 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type execDB struct {
+var (
+	//go:embed migrations
+	embedFS    embed.FS
+	migrations = migrate.EmbeddedMigrations{
+		FS:   embedFS,
+		Path: "migrations",
+	}
+)
+
+type requestStore struct {
 	db   *sql.DB
 	path string
 }
 
-func newExecDB(path string) (*execDB, error) {
+func newExecDB(path string) (*requestStore, error) {
 	p := path
 	if p == "" {
 		cacheDir, err := ensureDefaultCacheDir()
@@ -31,7 +41,7 @@ func newExecDB(path string) (*execDB, error) {
 		p = filepath.Join(cacheDir, defaultDBFilename)
 	}
 
-	db := &execDB{path: filepath.Clean(p)}
+	db := &requestStore{path: filepath.Clean(p)}
 
 	if err := db.open(); err != nil {
 		return nil, err
@@ -40,8 +50,8 @@ func newExecDB(path string) (*execDB, error) {
 	return db, nil
 }
 
-func (e *execDB) open() (retErr error) {
-	db, err := sql.Open("sqlite", e.path)
+func (rs *requestStore) open() (retErr error) {
+	db, err := sql.Open("sqlite", rs.path)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %v", err)
 	}
@@ -62,17 +72,17 @@ func (e *execDB) open() (retErr error) {
 		return fmt.Errorf("failed to apply migrations: %v", err)
 	}
 
-	e.db = db
+	rs.db = db
 
 	return nil
 }
 
-func (e *execDB) close() error {
-	if e == nil || e.db == nil {
+func (rs *requestStore) close() error {
+	if rs == nil || rs.db == nil {
 		return nil
 	}
 
-	return e.db.Close()
+	return rs.db.Close()
 }
 
 func ensureDefaultCacheDir() (dir string, _ error) {
@@ -89,15 +99,15 @@ func ensureDefaultCacheDir() (dir string, _ error) {
 	return cacheDir, nil
 }
 
-const newRequestQuery = `
+const insertQuery = `
 	INSERT INTO
 		requests (uuid, path, state)
 	VALUES
 		(?, ?, ?)
 `
 
-func (e *execDB) insertNewRequest(ctx context.Context, uuid string, req RequestState) (int, error) {
-	return e.execContext(ctx, newRequestQuery, uuid, req.Path, req.State)
+func (rs *requestStore) insert(ctx context.Context, uuid string, req RequestState) (int, error) {
+	return rs.execContext(ctx, insertQuery, uuid, req.Path, req.State)
 }
 
 const updateStateQuery = `
@@ -108,11 +118,11 @@ const updateStateQuery = `
 		uuid = ?
 `
 
-func (e *execDB) updateRequestState(ctx context.Context, uuid string, state execState) (int, error) {
-	return e.execContext(ctx, updateStateQuery, state, uuid)
+func (rs *requestStore) updateState(ctx context.Context, uuid string, state execState) (int, error) {
+	return rs.execContext(ctx, updateStateQuery, state, uuid)
 }
 
-const completeRequestQuery = `
+const completeQuery = `
 	UPDATE requests
 	SET
 		state = ?,
@@ -127,8 +137,8 @@ const completeRequestQuery = `
 		uuid = ?
 `
 
-func (e *execDB) completeRequest(ctx context.Context, uuid string, req RequestState) (int, error) {
-	return e.execContext(ctx, completeRequestQuery,
+func (rs *requestStore) complete(ctx context.Context, uuid string, req RequestState) (int, error) {
+	return rs.execContext(ctx, completeQuery,
 		req.State,
 		req.Result.Stdout,
 		req.Result.Stderr,
@@ -157,10 +167,10 @@ const selectQuery = `
 		requests
 `
 
-func (e *execDB) selectRequestByUUID(ctx context.Context, uuid string) (RequestState, error) {
+func (rs *requestStore) selectByUUID(ctx context.Context, uuid string) (RequestState, error) {
 	query := selectQuery + "WHERE uuid = ?"
 
-	row := e.db.QueryRowContext(ctx, query, uuid)
+	row := rs.db.QueryRowContext(ctx, query, uuid)
 
 	req, err := scanRequest(row)
 	if err != nil {
@@ -174,7 +184,7 @@ func (e *execDB) selectRequestByUUID(ctx context.Context, uuid string) (RequestS
 	return req, nil
 }
 
-func (e *execDB) selectRequests(ctx context.Context, cursor string, filters []string, limit int) ([]RequestState, error) {
+func (rs *requestStore) selectPage(ctx context.Context, cursor string, filters []string, limit int) ([]RequestState, error) {
 	query := selectQuery + "WHERE true "
 	args := []any{}
 
@@ -201,7 +211,7 @@ func (e *execDB) selectRequests(ctx context.Context, cursor string, filters []st
 		args = append(args, limit)
 	}
 
-	rows, err := e.db.QueryContext(ctx, query, args...)
+	rows, err := rs.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query requests: %v", err)
 	}
@@ -289,8 +299,8 @@ func scanRequest(rows interface{ Scan(dest ...any) error }) (RequestState, error
 	return req, nil
 }
 
-func (e *execDB) execContext(ctx context.Context, query string, args ...any) (int, error) {
-	res, err := e.db.ExecContext(ctx, query, args...)
+func (rs *requestStore) execContext(ctx context.Context, query string, args ...any) (int, error) {
+	res, err := rs.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
