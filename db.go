@@ -96,7 +96,7 @@ const newRequestQuery = `
 		(?, ?, ?)
 `
 
-func (e *execDB) insertNewRequest(ctx context.Context, uuid string, req RequestStateWithCancel) (int, error) {
+func (e *execDB) insertNewRequest(ctx context.Context, uuid string, req RequestState) (int, error) {
 	return e.execContext(ctx, newRequestQuery, uuid, req.Path, req.State)
 }
 
@@ -127,7 +127,7 @@ const completeRequestQuery = `
 		uuid = ?
 `
 
-func (e *execDB) completeRequest(ctx context.Context, uuid string, req RequestStateWithCancel) (int, error) {
+func (e *execDB) completeRequest(ctx context.Context, uuid string, req RequestState) (int, error) {
 	return e.execContext(ctx, completeRequestQuery,
 		req.State,
 		req.Result.Stdout,
@@ -179,7 +179,7 @@ func (e *execDB) selectRequests(ctx context.Context, cursor string, filters []st
 	args := []any{}
 
 	if cursor != "" {
-		query += "AND uuid < ? "
+		query += "AND uuid <= ? "
 
 		args = append(args, cursor)
 	}

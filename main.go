@@ -147,7 +147,7 @@ func hash(filename string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func newJobsHandler(cancelableJobs *safeMap[string, RequestStateWithCancel]) http.Handler {
+func newJobsHandler() http.Handler {
 	type JobsSummary struct {
 		ID          string    `json:"id,omitempty"`
 		Path        string    `json:"path,omitempty"`
@@ -182,27 +182,11 @@ func newJobsHandler(cancelableJobs *safeMap[string, RequestStateWithCancel]) htt
 		return true
 	}
 
-	paginate := func(w http.ResponseWriter, r *http.Request, summary []JobsSummary, cursor string, limit int) {
-		start := slices.IndexFunc(summary, func(e JobsSummary) bool {
-			return cursor == "" || e.ID == cursor // no cursor means serve first page
-		})
-
-		if start == -1 {
-			http.Error(w, "cursor does not exists", http.StatusBadRequest)
-
-			return
-		}
-
-		end := min(start+limit, len(summary))
-
-		page := summary[start:end]
-
-		if end < len(summary) {
-			nextCursor := summary[end].ID
-
+	writeResp := func(w http.ResponseWriter, r *http.Request, page []JobsSummary, next *JobsSummary, limit int) {
+		if next != nil {
 			u := *r.URL
 			q := u.Query()
-			q.Set("cursor", nextCursor)
+			q.Set("cursor", next.ID)
 			q.Set("limit", strconv.Itoa(limit))
 			u.RawQuery = q.Encode()
 
@@ -219,6 +203,20 @@ func newJobsHandler(cancelableJobs *safeMap[string, RequestStateWithCancel]) htt
 		writeJSON(w, http.StatusOK, page)
 	}
 
+	convert := func(r RequestState) JobsSummary {
+		return JobsSummary{
+			ID:          r.UUID,
+			Path:        r.Path,
+			State:       r.State,
+			Detached:    r.Result.Detached,
+			PID:         r.Result.PID,
+			ExitCode:    r.Result.ExitCode,
+			Error:       r.Result.Error,
+			StartedAt:   r.StartedAt,
+			CompletedAt: r.CompletedAt,
+		}
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -227,8 +225,11 @@ func newJobsHandler(cancelableJobs *safeMap[string, RequestStateWithCancel]) htt
 			return
 		}
 
-		summary := make([]JobsSummary, 0, cancelableJobs.len())
-		filters := make([]string, 0, len(allowedFilters))
+		var (
+			cursor     = r.URL.Query().Get("cursor")
+			pagination = len(r.URL.Query().Get("limit")) > 0
+			filters    = make([]string, 0, len(allowedFilters))
+		)
 
 		for _, s := range r.URL.Query()["filter"] {
 			filters = append(filters, strings.Split(s, ",")...)
@@ -244,51 +245,56 @@ func newJobsHandler(cancelableJobs *safeMap[string, RequestStateWithCancel]) htt
 			return
 		}
 
-		cancelableJobs.safeRange(func(k string, v RequestStateWithCancel) {
-			if len(filters) > 0 && !slices.Contains(filters, string(v.State)) {
-				return
-			}
+		raw := r.URL.Query().Get("limit")
 
-			summary = append(summary, JobsSummary{
-				ID:          k,
-				Path:        v.Path,
-				State:       v.State,
-				Detached:    v.Result.Detached,
-				PID:         v.Result.PID,
-				ExitCode:    v.Result.ExitCode,
-				Error:       v.Result.Error,
-				StartedAt:   v.StartedAt,
-				CompletedAt: v.CompletedAt,
-			})
-		})
-
-		slices.SortFunc(summary, func(a, b JobsSummary) int {
-			return b.StartedAt.Compare(a.StartedAt) // descent
-		})
-
-		var (
-			limit  = r.URL.Query().Get("limit")
-			cursor = r.URL.Query().Get("cursor")
-		)
-
-		if limit == "" {
-			writeJSON(w, http.StatusOK, summary)
-
-			return
-		}
-
-		l, err := strconv.Atoi(limit)
+		limit, err := parseInt(raw, 0)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("invalid limit: %s", err), http.StatusBadRequest)
 
 			return
 		}
 
-		paginate(w, r, summary, cursor, l)
+		additional := 0
+		if limit != 0 {
+			additional = 1
+		}
+
+		ctx := r.Context()
+
+		requests, err := execdb.selectRequests(ctx, cursor, filters, limit+additional)
+		if err != nil {
+			http.Error(
+				w,
+				"select requests: "+err.Error(),
+				http.StatusInternalServerError,
+			)
+
+			return
+		}
+
+		summary := make([]JobsSummary, 0, len(requests))
+
+		for _, r := range requests {
+			summary = append(summary, convert(r))
+		}
+
+		var (
+			next *JobsSummary
+			page = summary
+		)
+
+		if pagination && len(summary) > limit {
+			n := convert(requests[limit])
+			next = &n
+
+			page = summary[:limit]
+		}
+
+		writeResp(w, r, page, next, limit)
 	})
 }
 
-func newJobHandler(appCtx context.Context, cancelableJobs *safeMap[string, RequestStateWithCancel]) http.Handler {
+func newJobHandler(appCtx context.Context, cancelableJobs *safeMap[string, func()]) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "" {
@@ -296,23 +302,33 @@ func newJobHandler(appCtx context.Context, cancelableJobs *safeMap[string, Reque
 			return
 		}
 
-		job, ok := cancelableJobs.load(id)
-		if !ok {
-			http.Error(w, "job not found", http.StatusNotFound)
-			return
-		}
-
 		switch r.Method {
 		case http.MethodGet:
+			ctx := r.Context()
+
+			//nolint:contextcheck // request ctx
+			job, err := execdb.selectRequestByUUID(ctx, id)
+			if err != nil {
+				http.Error(w, "job not found: "+err.Error(), http.StatusNotFound)
+
+				return
+			}
+
 			writeJSON(w, http.StatusOK, job)
 
 		case http.MethodDelete:
-			if job.cancel == nil {
+			cancel, ok := cancelableJobs.load(id)
+			if !ok {
+				http.Error(w, "job not found", http.StatusNotFound)
+				return
+			}
+
+			if cancel == nil {
 				http.Error(w, "job not cancellable", http.StatusBadRequest)
 				return
 			}
 
-			job.cancel()
+			cancel()
 
 			w.WriteHeader(http.StatusNoContent)
 
@@ -341,6 +357,19 @@ func toEnvKey(s string) (key string) {
 	return buf.String()
 }
 
+func parseInt(s string, fallback int) (int, error) {
+	if s == "" {
+		return fallback, nil
+	}
+
+	l, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+
+	return l, nil
+}
+
 func paramsToEnv(r *http.Request, pathParams []string) []string {
 	params := r.URL.Query()
 	env := make([]string, 0, len(params)+len(pathParams))
@@ -356,7 +385,7 @@ func paramsToEnv(r *http.Request, pathParams []string) []string {
 	return env
 }
 
-func newExecHandler(appCtx context.Context, e Endpoint, cancelableJobs *safeMap[string, RequestStateWithCancel]) http.Handler {
+func newExecHandler(appCtx context.Context, e Endpoint, cancelableJobs *safeMap[string, func()]) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		v, ok := r.Context().Value(requestKey).(string)
 		if !ok {
@@ -370,14 +399,11 @@ func newExecHandler(appCtx context.Context, e Endpoint, cancelableJobs *safeMap[
 			ID string `json:"id,omitempty"`
 		}{ID: id})
 
-		rs := RequestStateWithCancel{
+		rs := RequestState{
 			State:     execStateQueued,
 			StartedAt: time.Now(),
 			Path:      e.path,
 		}
-
-		cancelableJobs.store(id, rs) // FIXME: remove, only store cancel func
-
 		if _, err := execdb.insertNewRequest(appCtx, id, rs); err != nil {
 			logger.Error("error saving new request to database", "err", err)
 		}
@@ -386,14 +412,11 @@ func newExecHandler(appCtx context.Context, e Endpoint, cancelableJobs *safeMap[
 	})
 }
 
-func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string, RequestStateWithCancel], id string, env []string) {
+func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string, func()], id string, env []string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cancelableJobs.upsert(id, func(old RequestStateWithCancel) RequestStateWithCancel {
-		old.State, old.cancel = execStateRunning, cancel
-		return old
-	})
+	cancelableJobs.store(id, cancel)
 
 	if _, err := execdb.updateRequestState(ctx, id, execStateRunning); err != nil {
 		logger.Error("error persisting running request state", "err", err)
@@ -401,10 +424,9 @@ func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string,
 
 	execResult := e.run(ctx, env)
 
-	completed := RequestStateWithCancel{
+	completed := RequestState{
 		State:       execStateCompleted,
 		CompletedAt: time.Now(),
-		cancel:      nil,
 	}
 
 	if execResult != nil {
@@ -414,13 +436,6 @@ func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string,
 	if execResult.Error != "" || (execResult.ExitCode != nil && *execResult.ExitCode != 0) {
 		completed.State = execStateFailed
 	}
-
-	cancelableJobs.upsert(id, func(old RequestStateWithCancel) RequestStateWithCancel {
-		completed.Path = old.Path
-		completed.StartedAt = old.StartedAt
-
-		return completed
-	})
 
 	if _, err := execdb.completeRequest(ctx, id, completed); err != nil {
 		logger.Error("error persisting completed request data", "err", err)
@@ -443,11 +458,7 @@ func newRoutesHandler(es []Endpoint) http.Handler {
 	for i, e := range es {
 		routes[i] = route{
 			Summary: e.Summary,
-			Path: fmt.Sprintf(
-				"%s %s",
-				strings.ToUpper(e.method),
-				path.Join(defaultUserPrefix, e.path),
-			),
+			Path:    fmt.Sprintf("%s %s", strings.ToUpper(e.method), e.path),
 			Cmd:     e.Cmd,
 			Timeout: e.Timeout,
 			Auth:    !e.NoAuth,
@@ -621,16 +632,6 @@ type RequestState struct {
 	CompletedAt time.Time  `json:"completed_at,omitzero,omitempty"`
 }
 
-// FIXME: remove
-type RequestStateWithCancel struct {
-	Path        string     `json:"path,omitempty"`
-	State       execState  `json:"state,omitempty"`
-	Result      ExecResult `json:"result,omitempty"`
-	StartedAt   time.Time  `json:"started_at,omitzero,omitempty"`
-	CompletedAt time.Time  `json:"completed_at,omitzero,omitempty"`
-	cancel      func()
-}
-
 var (
 	//go:embed migrations
 	embedFS    embed.FS
@@ -645,7 +646,7 @@ func main() {
 
 	mustInitialize()
 
-	mux, cancelableJobs := http.NewServeMux(), newSafeMap[string, RequestStateWithCancel]()
+	mux, cancelableJobs := http.NewServeMux(), newSafeMap[string, func()]()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	go cancelableJobs.periodicCompact(ctx, 60*time.Minute)
@@ -672,7 +673,7 @@ func main() {
 		withTracing,
 	))
 
-	mux.Handle("GET /jobs", chain(newJobsHandler(cancelableJobs),
+	mux.Handle("GET /jobs", chain(newJobsHandler(),
 		withMeta,
 		withCORS,
 		withTracing,
