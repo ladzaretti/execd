@@ -41,13 +41,13 @@ func newExecDB(path string) (*requestStore, error) {
 		p = filepath.Join(cacheDir, defaultDBFilename)
 	}
 
-	db := &requestStore{path: filepath.Clean(p)}
+	rs := &requestStore{path: filepath.Clean(p)}
 
-	if err := db.open(); err != nil {
+	if err := rs.open(); err != nil {
 		return nil, err
 	}
 
-	return db, nil
+	return rs, nil
 }
 
 func (rs *requestStore) open() (retErr error) {
