@@ -1,0 +1,16 @@
+{{define "fragments/exec_table.tmpl"}}
+<table>
+  <thead><tr><th>ID</th><th>Cmd</th><th>Status</th></tr></thead>
+  <tbody>
+    {{range .Execs}}
+      <tr id="exec-{{.ID}}">
+        <td>{{.ID}}</td>
+        <td><code>{{.Command}}</code></td>
+        <td>{{.Status}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="3">No executions yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

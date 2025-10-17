@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -509,4 +510,68 @@ func parseInt(s string, fallback int) (int, error) {
 	}
 
 	return l, nil
+}
+
+func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()]) *http.ServeMux {
+	mux := http.NewServeMux()
+
+	for _, e := range config.Endpoints {
+		h, token := newExecHandler(ctx, e, cancelableJobs), cmp.Or(e.Token, config.Token)
+		pattern := fmt.Sprintf(
+			"%s %s",
+			strings.ToUpper(e.method),
+			e.path,
+		)
+
+		mux.Handle(pattern, chain(h,
+			withAuth(token, e.NoAuth),
+			withMeta,
+			withCORS,
+			withTracing,
+		))
+	}
+
+	mux.Handle("GET /jobs/{id}", chain(newJobHandler(ctx, cancelableJobs),
+		withMeta,
+		withCORS,
+		withTracing,
+	))
+
+	mux.Handle("GET /jobs", chain(newJobsHandler(),
+		withMeta,
+		withCORS,
+		withTracing,
+	))
+
+	internal := []Endpoint{
+		{
+			Summary: "Retrieve job details by ID.",
+			resolvedEndpoint: resolvedEndpoint{
+				path:   "/jobs/{id}",
+				method: "GET",
+			},
+		},
+		{
+			Summary: "List recently completed jobs.",
+			resolvedEndpoint: resolvedEndpoint{
+				path:   "/jobs",
+				method: "GET",
+			},
+		},
+		{
+			Summary: "List all user defined execution routes.",
+			resolvedEndpoint: resolvedEndpoint{
+				path:   "/user-routes",
+				method: "GET",
+			},
+		},
+	}
+
+	mux.Handle("GET /user-routes", chain(newRoutesHandler(append(internal, config.Endpoints...)),
+		withMeta,
+		withCORS,
+		withTracing,
+	))
+
+	return mux
 }

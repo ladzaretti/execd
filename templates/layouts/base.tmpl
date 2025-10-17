@@ -1,0 +1,15 @@
+{{define "layouts/base"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{block "title" .}}execd UI{{end}}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body>
+  <main id="content">
+    {{block "content" .}}{{end}}
+  </main>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,14 @@
+{{define "title"}}Executions · execd{{end}}
+
+{{define "content"}}
+  <h1>Executions</h1>
+  <div id="exec-table"
+       hx-get="/hx/execs"
+       hx-trigger="load"
+       hx-target="#exec-table"
+       hx-swap="innerHTML">Loading…</div>
+{{end}}
+
+{{define "pages/execs.tmpl"}}
+  {{template "layouts/base" .}}
+{{end}}

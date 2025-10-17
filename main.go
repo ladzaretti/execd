@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -95,13 +94,13 @@ func mustInitialize() {
 
 	config = c
 
-	db, err := newExecDB(c.DBPath)
+	reqs, err := newExecDB(c.DBPath)
 	if err != nil {
 		logger.Error("exec db:", "err", err)
 		os.Exit(1)
 	}
 
-	requests = db
+	requests = reqs
 }
 
 func hash(filename string) (string, error) {
@@ -133,48 +132,24 @@ func main() {
 
 	mustInitialize()
 
-	mux, cancelableJobs := http.NewServeMux(), newSafeMap[string, func()]()
+	rr := newRenderer()
+
+	root, cancelableJobs := http.NewServeMux(), newSafeMap[string, func()]()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	go cancelableJobs.periodicCompact(ctx, 60*time.Minute)
 
-	for _, e := range config.Endpoints {
-		h, token := newExecHandler(ctx, e, cancelableJobs), cmp.Or(e.Token, config.Token)
-		pattern := fmt.Sprintf(
-			"%s %s",
-			strings.ToUpper(e.method),
-			e.path,
-		)
+	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, cancelableJobs)))
+	root.Handle("/hx/", http.StripPrefix("/hx", newHXRoutes(rr)))
+	root.Handle("/ui/", http.StripPrefix("/ui", newUIRoutes(rr)))
 
-		mux.Handle(pattern, chain(h,
-			withAuth(token, e.NoAuth),
-			withMeta,
-			withCORS,
-			withTracing,
-		))
-	}
-
-	mux.Handle("GET /jobs/{id}", chain(newJobHandler(ctx, cancelableJobs),
-		withMeta,
-		withCORS,
-		withTracing,
-	))
-
-	mux.Handle("GET /jobs", chain(newJobsHandler(),
-		withMeta,
-		withCORS,
-		withTracing,
-	))
-
-	mux.Handle("GET /user-routes", chain(newRoutesHandler(config.Endpoints),
-		withMeta,
-		withCORS,
-		withTracing,
-	))
+	root.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	}))
 
 	srv := &http.Server{
 		Addr:              config.ListenAddr,
-		Handler:           mux,
+		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
