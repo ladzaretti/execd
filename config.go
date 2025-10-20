@@ -13,12 +13,18 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
+type Server struct {
+	LogLevel   string `json:"log_level,omitempty"     toml:"log_level,commented"`
+	DBPath     string `json:"database_path,omitempty" toml:"database_path,commented"`
+	Token      string `json:"token,omitempty"         toml:"token,commented"`
+	ListenAddr string `json:"listen_addr,omitempty"   toml:"listen_addr,commented"`
+	CertFile   string `json:"cert_file,omitempty"     toml:"cert_file,commented"`
+	KeyFile    string `json:"key_file,omitempty"      toml:"key_file,commented"`
+}
+
 type Config struct {
-	LogLevel   string     `json:"log_level,omitempty"     toml:"log_level,commented"`
-	DBPath     string     `json:"database_path,omitempty" toml:"database_path,commented"`
-	Token      string     `json:"token,omitempty"         toml:"token,commented"`
-	ListenAddr string     `json:"listen_addr,omitempty"   toml:"listen_addr,commented"`
-	Endpoints  []Endpoint `json:"endpoints,omitempty"     toml:"endpoints,commented"`
+	Server    Server     `json:"server,omitempty"    toml:"server,commented"`
+	Endpoints []Endpoint `json:"endpoints,omitempty" toml:"endpoints,commented"`
 
 	configPath string
 	sha        string
@@ -27,15 +33,19 @@ type Config struct {
 func (c *Config) validate() error {
 	uid := os.Getuid()
 
-	if c.ListenAddr == "" {
+	if c.Server.ListenAddr == "" {
 		return errors.New("listen_addr must not be empty")
 	}
 
-	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
+	if c.Server.Token == "" {
+		return errors.New("server token must not be empty")
+	}
+
+	if _, _, err := net.SplitHostPort(c.Server.ListenAddr); err != nil {
 		return fmt.Errorf("listen_addr must be host:port or :port: %v", err)
 	}
 
-	_, err := parseLogLevel(c.LogLevel)
+	_, err := parseLogLevel(c.Server.LogLevel)
 	if err != nil {
 		return fmt.Errorf("invalid log level: %v", err)
 	}
@@ -55,8 +65,6 @@ func (c *Config) validate() error {
 				"path", e.Path,
 				"index", i,
 			)
-		} else if c.Token == "" && e.Token == "" {
-			return fmt.Errorf("token missing for path: %q: set global token or endpoint[%d].token", e.Path, i)
 		}
 
 		if _, dup := seen[e.Path]; dup {
@@ -74,7 +82,7 @@ func (c *Config) setDefaults() error {
 		return errors.New("cannot set defaults on nil config")
 	}
 
-	c.ListenAddr = cmp.Or(c.ListenAddr, defaultListenAddr)
+	c.Server.ListenAddr = cmp.Or(c.Server.ListenAddr, defaultListenAddr)
 
 	return nil
 }
@@ -85,14 +93,10 @@ func (c *Config) redact() *Config {
 	}
 
 	redacted := *c
-
-	if redacted.Token != "" {
-		redacted.Token = redact
-	}
-
 	redacted.Endpoints = append([]Endpoint(nil), redacted.Endpoints...)
-	for i, e := range redacted.Endpoints {
-		redacted.Endpoints[i] = e.redact()
+
+	if redacted.Server.Token != "" {
+		redacted.Server.Token = redact
 	}
 
 	return &redacted

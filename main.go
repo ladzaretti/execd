@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -26,7 +27,7 @@ const (
 	defaultConfigName = ".execd.toml"
 	defaultCacheDir   = ".execd.d"
 	defaultDBFilename = "execd.sqlite"
-	defaultListenAddr = ":8081"
+	defaultListenAddr = ":8443"
 	redact            = "*****"
 )
 
@@ -87,14 +88,14 @@ func mustInitialize() {
 
 	logger.Info("config sha256", "sha", c.sha)
 
-	l, _ := parseLogLevel(c.LogLevel) // already validated during config parsing
+	l, _ := parseLogLevel(c.Server.LogLevel) // already validated during config parsing
 
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l}))
 	logger.Info("resolved config", "path", configPath, "config", c.redact())
 
 	config = c
 
-	reqs, err := newExecDB(c.DBPath)
+	reqs, err := newExecDB(c.Server.DBPath)
 	if err != nil {
 		logger.Error("exec db:", "err", err)
 		os.Exit(1)
@@ -143,21 +144,20 @@ func main() {
 	root.Handle("/hx/", http.StripPrefix("/hx", newHXRoutes(rr)))
 	root.Handle("/ui/", http.StripPrefix("/ui", newUIRoutes(rr)))
 
-	root.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/ui/", http.StatusFound)
-	}))
-
 	srv := &http.Server{
-		Addr:              config.ListenAddr,
+		Addr:              config.Server.ListenAddr,
 		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS13,
+		},
 	}
 
 	lc := net.ListenConfig{}
 
-	l, err := lc.Listen(ctx, "tcp", config.ListenAddr)
+	l, err := lc.Listen(ctx, "tcp", config.Server.ListenAddr)
 	if err != nil {
-		logger.Error("listen failed", "addr", config.ListenAddr, "err", err)
+		logger.Error("listen failed", "addr", config.Server.ListenAddr, "err", err)
 		os.Exit(1)
 	}
 
@@ -165,7 +165,11 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func(ch chan error) {
-		ch <- srv.Serve(l)
+		ch <- srv.ServeTLS(
+			l,
+			config.Server.CertFile,
+			config.Server.KeyFile,
+		)
 
 		close(ch)
 	}(errCh)

@@ -30,7 +30,6 @@ type resolvedEndpoint struct {
 type Endpoint struct {
 	Summary      string   `json:"summary,omitempty"       toml:"summary,commented"`
 	Path         string   `json:"path,omitempty"          toml:"path,commented"`
-	Token        string   `json:"token,omitempty"         toml:"token,commented"`
 	Method       string   `json:"method,omitempty"        toml:"method,commented"`
 	Cmd          []string `json:"cmd,omitempty"           toml:"cmd,commented"`
 	EnvAllowlist []string `json:"env_allowlist,omitempty" toml:"env_allowlist,commented"`
@@ -100,17 +99,6 @@ func (e *Endpoint) resolve() {
 	for _, v := range matches {
 		e.pathParams = append(e.pathParams, v[1])
 	}
-}
-
-func (e *Endpoint) redact() Endpoint {
-	if e.Token == "" {
-		return *e
-	}
-
-	redacted := *e
-	redacted.Token = redact
-
-	return redacted
 }
 
 type ExecResult struct {

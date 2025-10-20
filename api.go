@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -485,10 +484,10 @@ func toEnvKey(s string) (key string) {
 }
 
 func paramsToEnv(r *http.Request, pathParams []string) []string {
-	params := r.URL.Query()
-	env := make([]string, 0, len(params)+len(pathParams))
+	queryParams := r.URL.Query()
+	env := make([]string, 0, len(queryParams)+len(pathParams))
 
-	for k, v := range params {
+	for k, v := range queryParams {
 		env = append(env, toEnvKey(k)+"="+strings.Join(v, " "))
 	}
 
@@ -516,7 +515,7 @@ func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()]) 
 	mux := http.NewServeMux()
 
 	for _, e := range config.Endpoints {
-		h, token := newExecHandler(ctx, e, cancelableJobs), cmp.Or(e.Token, config.Token)
+		h, token := newExecHandler(ctx, e, cancelableJobs), config.Server.Token
 		pattern := fmt.Sprintf(
 			"%s %s",
 			strings.ToUpper(e.method),
