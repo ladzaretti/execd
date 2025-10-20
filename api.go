@@ -361,29 +361,6 @@ func withAuth(token string, unsafe bool) func(h http.Handler) http.Handler { //n
 	}
 }
 
-func withCORS(h http.Handler) http.Handler {
-	methods := strings.Join(allowedHTTPMethods, ", ")
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin == "" {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		}
-
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", methods)
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		h.ServeHTTP(w, r)
-	})
-}
-
 type ctxKey string
 
 var requestKey ctxKey = "requestKey"
@@ -525,20 +502,17 @@ func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()]) 
 		mux.Handle(pattern, chain(h,
 			withAuth(token, e.NoAuth),
 			withMeta,
-			withCORS,
 			withTracing,
 		))
 	}
 
 	mux.Handle("GET /jobs/{id}", chain(newJobHandler(ctx, cancelableJobs),
 		withMeta,
-		withCORS,
 		withTracing,
 	))
 
 	mux.Handle("GET /jobs", chain(newJobsHandler(),
 		withMeta,
-		withCORS,
 		withTracing,
 	))
 
@@ -568,7 +542,6 @@ func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()]) 
 
 	mux.Handle("GET /user-routes", chain(newRoutesHandler(append(internal, config.Endpoints...)),
 		withMeta,
-		withCORS,
 		withTracing,
 	))
 

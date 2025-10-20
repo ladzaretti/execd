@@ -2,8 +2,3 @@
 bin
 dist
 coverage
-*.local.toml
-*.local.yaml
-*.local.json
-TODO.md
-cert
