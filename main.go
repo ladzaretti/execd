@@ -28,6 +28,7 @@ const (
 	defaultCacheDir   = ".execd.d"
 	defaultDBFilename = "execd.sqlite"
 	defaultListenAddr = ":8443"
+	defaultSessionTTL = 30 * time.Minute
 	redact            = "*****"
 )
 
@@ -125,22 +126,24 @@ func main() {
 
 	mustInitialize()
 
-	sess := newSessions()
-	rr := newRenderer()
-	password := config.Server.Password
+	var (
+		sess     = newSessions()
+		rr       = newRenderer()
+		password = config.Server.Password
+	)
 
 	root, cancelableJobs := http.NewServeMux(), newSafeMap[string, func()]()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
+	go sess.periodicCompact(ctx, 60*time.Minute)
 	go cancelableJobs.periodicCompact(ctx, 60*time.Minute)
 
-	// TODO: make ttl configurable, default 30m
-	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, sess, cancelableJobs, password, 30*time.Minute)))
+	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, sess, cancelableJobs, password, config.Server.sessionTTL)))
 	root.Handle("/hx/", http.StripPrefix("/hx", newHXRoutes(rr, sess, password)))
 	root.Handle("/ui/", http.StripPrefix("/ui", newUIRoutes(rr, sess, password)))
 
 	srv := &http.Server{
-		Addr:              config.Server.ListenAddr,
+		Addr:              config.Server.listenAddr,
 		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{

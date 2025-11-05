@@ -417,6 +417,10 @@ func (sess *sessions) touch(sid string) bool {
 	return true
 }
 
+func (sess *sessions) periodicCompact(ctx context.Context, interval time.Duration) {
+	sess.m.periodicCompact(ctx, interval)
+}
+
 func newLoginHandler(password string, ttl time.Duration, sess *sessions) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)

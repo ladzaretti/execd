@@ -9,9 +9,15 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
+
+type resolvedServer struct {
+	listenAddr string
+	sessionTTL time.Duration
+}
 
 type Server struct {
 	LogLevel   string `json:"log_level,omitempty"     toml:"log_level,commented"`
@@ -20,6 +26,9 @@ type Server struct {
 	ListenAddr string `json:"listen_addr,omitempty"   toml:"listen_addr,commented"`
 	CertFile   string `json:"cert_file,omitempty"     toml:"cert_file,commented"`
 	KeyFile    string `json:"key_file,omitempty"      toml:"key_file,commented"`
+	SessionTTL string `json:"session_ttl,omitempty"   toml:"session_ttl,commented"`
+
+	resolvedServer
 }
 
 type Config struct {
@@ -41,13 +50,21 @@ func (c *Config) validate() error {
 		return errors.New("server password must not be empty")
 	}
 
-	if _, _, err := net.SplitHostPort(c.Server.ListenAddr); err != nil {
-		return fmt.Errorf("listen_addr must be host:port or :port: %v", err)
+	if c.Server.ListenAddr != "" {
+		if _, _, err := net.SplitHostPort(c.Server.ListenAddr); err != nil {
+			return fmt.Errorf("listen_addr must be host:port or :port: %v", err)
+		}
 	}
 
 	_, err := parseLogLevel(c.Server.LogLevel)
 	if err != nil {
 		return fmt.Errorf("invalid log level: %v", err)
+	}
+
+	if c.Server.SessionTTL != "" {
+		if _, err := time.ParseDuration(c.Server.SessionTTL); err != nil {
+			return fmt.Errorf("invalid session ttl duration %q", c.Server.SessionTTL)
+		}
 	}
 
 	seen := make(map[string]struct{}, len(c.Endpoints))
@@ -77,12 +94,18 @@ func (c *Config) validate() error {
 	return nil
 }
 
-func (c *Config) setDefaults() error {
+func (c *Config) resolve() error {
 	if c == nil {
 		return errors.New("cannot set defaults on nil config")
 	}
 
-	c.Server.ListenAddr = cmp.Or(c.Server.ListenAddr, defaultListenAddr)
+	c.Server.listenAddr = cmp.Or(c.Server.ListenAddr, defaultListenAddr)
+	c.Server.sessionTTL = defaultSessionTTL
+
+	if c.Server.SessionTTL != "" {
+		t, _ := time.ParseDuration(c.Server.SessionTTL) // validated at [Config.validate]
+		c.Server.sessionTTL = t
+	}
 
 	return nil
 }
@@ -154,11 +177,11 @@ func loadFileConfig(path string) (*Config, error) {
 		c = &Config{}
 	}
 
-	if err := c.setDefaults(); err != nil {
+	if err := c.validate(); err != nil {
 		return nil, err
 	}
 
-	if err := c.validate(); err != nil {
+	if err := c.resolve(); err != nil {
 		return nil, err
 	}
 
