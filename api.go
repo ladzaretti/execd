@@ -298,7 +298,7 @@ func newJobHandler(appCtx context.Context, cancelableJobs *safeMap[string, func(
 	})
 }
 
-func newRoutesHandler(es []Endpoint) http.Handler {
+func newUserRoutesHandler(endpoints []Endpoint) http.Handler {
 	type route struct {
 		Summary string   `json:"summary,omitempty"`
 		Path    string   `json:"path,omitempty"`
@@ -307,9 +307,9 @@ func newRoutesHandler(es []Endpoint) http.Handler {
 		Auth    bool     `json:"requires_auth"`
 	}
 
-	routes := make([]route, len(es))
+	routes := make([]route, len(endpoints))
 
-	for i, e := range es {
+	for i, e := range endpoints {
 		routes[i] = route{
 			Summary: e.Summary,
 			Path:    fmt.Sprintf("%s %s", strings.ToUpper(e.method), e.path),
@@ -488,6 +488,30 @@ func parseInt(s string, fallback int) (int, error) {
 	return l, nil
 }
 
+var internalEndpoints = []Endpoint{
+	{
+		Summary: "Retrieve job details by ID.",
+		resolvedEndpoint: resolvedEndpoint{
+			path:   "/jobs/{id}",
+			method: "GET",
+		},
+	},
+	{
+		Summary: "List recently completed jobs.",
+		resolvedEndpoint: resolvedEndpoint{
+			path:   "/jobs",
+			method: "GET",
+		},
+	},
+	{
+		Summary: "List all user defined execution routes.",
+		resolvedEndpoint: resolvedEndpoint{
+			path:   "/user-routes",
+			method: "GET",
+		},
+	},
+}
+
 func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()]) *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -516,31 +540,7 @@ func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()]) 
 		withTracing,
 	))
 
-	internal := []Endpoint{
-		{
-			Summary: "Retrieve job details by ID.",
-			resolvedEndpoint: resolvedEndpoint{
-				path:   "/jobs/{id}",
-				method: "GET",
-			},
-		},
-		{
-			Summary: "List recently completed jobs.",
-			resolvedEndpoint: resolvedEndpoint{
-				path:   "/jobs",
-				method: "GET",
-			},
-		},
-		{
-			Summary: "List all user defined execution routes.",
-			resolvedEndpoint: resolvedEndpoint{
-				path:   "/user-routes",
-				method: "GET",
-			},
-		},
-	}
-
-	mux.Handle("GET /user-routes", chain(newRoutesHandler(append(internal, config.Endpoints...)),
+	mux.Handle("GET /user-routes", chain(newUserRoutesHandler(append(internalEndpoints, config.Endpoints...)),
 		withMeta,
 		withTracing,
 	))

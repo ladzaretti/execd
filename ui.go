@@ -73,6 +73,7 @@ func newUIRoutes(rr *renderer) *http.ServeMux {
 	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/execs", http.StatusFound)
 	}))
+
 	mux.Handle("GET /execs", newUIHandler(rr))
 
 	return mux

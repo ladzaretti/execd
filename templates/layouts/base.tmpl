@@ -1,15 +1,57 @@
 {{define "layouts/base"}}
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <title>{{block "title" .}}execd UI{{end}}</title>
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css" />
+  
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+
+  <style>
+    #theme-toggle { cursor: pointer; font-size: 1.2rem; }
+
+    html[data-theme="light"] #theme-toggle { color: #111; }
+    html[data-theme="dark"]  #theme-toggle { color: #ffdd57; }
+
+    #theme-toggle .sun  { display: none; }
+    html[data-theme="dark"]  #theme-toggle .moon { display: none; }
+    html[data-theme="dark"]  #theme-toggle .sun  { display: inline; }
+  </style>
 </head>
 <body>
+  <header style="display:flex;justify-content:space-between;align-items:center;">
+    <strong>execd UI</strong>
+    <span id="theme-toggle" title="Toggle theme">
+      <i class="fa-solid fa-moon moon" aria-hidden="true"></i>
+      <i class="fa-solid fa-sun sun"  aria-hidden="true"></i>
+    </span>
+  </header>
+
   <main id="content">
     {{block "content" .}}{{end}}
   </main>
+
+  <script>
+    (function () {
+      const html = document.documentElement;
+      const toggle = document.getElementById("theme-toggle");
+
+      const saved = localStorage.getItem("theme");
+      if (["light", "dark"].includes(saved)) {
+        html.dataset.theme = saved;
+      }
+
+      toggle.addEventListener("click", () => {
+        const nextTheme = html.dataset.theme === "light" ? "dark" : "light";
+        
+        html.dataset.theme = nextTheme;
+        localStorage.setItem("theme", nextTheme);
+      });
+    })();
+  </script>
 </body>
 </html>
 {{end}}
