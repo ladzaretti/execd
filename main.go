@@ -120,29 +120,24 @@ func hash(filename string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func chain(h http.Handler, middlewares ...func(h http.Handler) http.Handler) http.Handler {
-	for _, m := range middlewares {
-		h = m(h)
-	}
-
-	return h
-}
-
 func main() {
 	subcommands()
 
 	mustInitialize()
 
+	sess := newSessions()
 	rr := newRenderer()
+	password := config.Server.Password
 
 	root, cancelableJobs := http.NewServeMux(), newSafeMap[string, func()]()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	go cancelableJobs.periodicCompact(ctx, 60*time.Minute)
 
-	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, cancelableJobs)))
-	root.Handle("/hx/", http.StripPrefix("/hx", newHXRoutes(rr)))
-	root.Handle("/ui/", http.StripPrefix("/ui", newUIRoutes(rr)))
+	// TODO: make ttl configurable, default 30m
+	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, sess, cancelableJobs, password, 30*time.Minute)))
+	root.Handle("/hx/", http.StripPrefix("/hx", newHXRoutes(rr, sess, password)))
+	root.Handle("/ui/", http.StripPrefix("/ui", newUIRoutes(rr, sess, password)))
 
 	srv := &http.Server{
 		Addr:              config.Server.ListenAddr,

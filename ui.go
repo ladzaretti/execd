@@ -67,22 +67,40 @@ func newHXHandler(rr *renderer) http.Handler {
 	})
 }
 
-func newUIRoutes(rr *renderer) *http.ServeMux {
+func newUIRoutes(rr *renderer, sess *sessions, password string) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/ui/execs", http.StatusFound)
-	}))
+	mux.Handle("GET /", chain(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/ui/execs", http.StatusFound)
+		}),
+		withSecurityHeaders,
+		withAuth(password, false, sess),
+		withMeta,
+		withTracing,
+	))
 
-	mux.Handle("GET /execs", newUIHandler(rr))
+	mux.Handle("GET /execs", chain(
+		newUIHandler(rr),
+		withSecurityHeaders,
+		withAuth(password, false, sess),
+		withMeta,
+		withTracing,
+	))
 
 	return mux
 }
 
-func newHXRoutes(rr *renderer) *http.ServeMux {
+func newHXRoutes(rr *renderer, sess *sessions, password string) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.Handle("GET /execs", newHXHandler(rr))
+	mux.Handle("GET /execs", chain(
+		newHXHandler(rr),
+		withSecurityHeaders,
+		withAuth(password, false, sess),
+		withMeta,
+		withTracing,
+	))
 
 	return mux
 }

@@ -3,17 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/google/uuid"
 )
 
 type execState string
@@ -334,31 +336,212 @@ func newUserRoutesHandler(endpoints []Endpoint) http.Handler {
 	})
 }
 
-func withAuth(token string, unsafe bool) func(h http.Handler) http.Handler { //nolint:revive //unused-parameter
-	const bearer = "Bearer "
+type session struct {
+	csrf string
+	ttl  time.Duration
+	iat  time.Time
+	exp  time.Time
+}
 
-	return func(h http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodOptions || unsafe {
-				h.ServeHTTP(w, r)
-				return
-			}
-
-			auth := r.Header.Get("Authorization")
-			if len(auth) < len(bearer) || !strings.EqualFold(auth[:len(bearer)], bearer) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			got, want := []byte(auth[len(bearer):]), []byte(token)
-			if subtle.ConstantTimeCompare(got, want) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			h.ServeHTTP(w, r)
-		})
+func newSession(ttl time.Duration) (session, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return session{}, err
 	}
+
+	var (
+		csrf = base64.RawURLEncoding.EncodeToString(raw)
+		now  = time.Now()
+	)
+
+	return session{
+		csrf: csrf,
+		ttl:  ttl,
+		iat:  now,
+		exp:  now.Add(ttl),
+	}, nil
+}
+
+type sessions struct {
+	m *safeMap[string, session]
+}
+
+func newSessions() *sessions { return &sessions{m: newSafeMap[string, session]()} }
+
+func (sess *sessions) login(ttl time.Duration) (sid string, s session, err error) {
+	raw := make([]byte, 32)
+	if _, err = rand.Read(raw); err != nil {
+		return "", session{}, fmt.Errorf("sid: %w", err)
+	}
+
+	sid = base64.RawURLEncoding.EncodeToString(raw)
+
+	s, err = newSession(ttl)
+	if err != nil {
+		return "", session{}, fmt.Errorf("new session: %w", err)
+	}
+
+	sess.m.store(sid, s)
+
+	return sid, s, nil
+}
+
+func (sess *sessions) logout(sid string) bool {
+	_, ok := sess.m.load(sid)
+	if ok {
+		sess.m.delete(sid)
+	}
+
+	return ok
+}
+
+func (sess *sessions) valid(sid string) (session, bool) {
+	s, ok := sess.m.load(sid)
+	if !ok || time.Now().After(s.exp) {
+		return session{}, false
+	}
+
+	return s, true
+}
+
+func (sess *sessions) touch(sid string) bool {
+	s, ok := sess.valid(sid)
+	if !ok {
+		return false
+	}
+
+	s.exp = time.Now().Add(s.ttl)
+
+	sess.m.store(sid, s)
+
+	return true
+}
+
+func newLoginHandler(password string, ttl time.Duration, sess *sessions) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+		pass, err := readPassword(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
+			time.Sleep(350 * time.Millisecond) // delay to reduce timing/bruteforce signal
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+			return
+		}
+
+		sid, s, err := sess.login(ttl)
+		if err != nil {
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+
+		setSessionCookies(w, sid, s.csrf, s.ttl)
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+var errMissingPassword = errors.New("missing password")
+
+func readPassword(r *http.Request) (string, error) {
+	contentType := r.Header.Get("Content-Type")
+
+	mediatype, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+
+	switch mediatype {
+	case "application/x-www-form-urlencoded", "multipart/form-data", "":
+		if err := r.ParseForm(); err != nil {
+			return "", fmt.Errorf("read form password: %w", err)
+		}
+
+		p := r.Form.Get("password")
+		if p == "" {
+			return "", errMissingPassword
+		}
+
+		return p, nil
+
+	case "application/json":
+		var body struct {
+			Password string `json:"password"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			return "", fmt.Errorf("read json password: %w", err)
+		}
+
+		if body.Password == "" {
+			return "", errMissingPassword
+		}
+
+		return body.Password, nil
+
+	default:
+		return "", fmt.Errorf("unsupported content-type: %s", contentType)
+	}
+}
+
+func setSessionCookies(w http.ResponseWriter, sid, csrf string, ttl time.Duration) {
+	maxAge := int(ttl.Seconds())
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "sid",
+		Value:    sid,
+		Path:     "/",
+		MaxAge:   maxAge,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   true,
+		HttpOnly: true,
+	})
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "csrf",
+		Value:    csrf,
+		Path:     "/",
+		MaxAge:   maxAge,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   true,
+	})
+}
+
+func newLogoutHandler(sess *sessions) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sidCookie, err := r.Cookie("sid")
+		if err == nil && sidCookie.Value != "" {
+			sess.logout(sidCookie.Value)
+		}
+
+		expireCookie := func(name string) {
+			http.SetCookie(w, &http.Cookie{
+				Name:     name,
+				Value:    "",
+				Path:     "/",
+				MaxAge:   -1,
+				SameSite: http.SameSiteStrictMode,
+				Secure:   true,
+				HttpOnly: name == "sid",
+			})
+		}
+
+		expireCookie("sid")
+		expireCookie("csrf")
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+func newMeHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 }
 
 type ctxKey string
@@ -386,55 +569,6 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	w.n += n
 
 	return n, err
-}
-
-func withTracing(h http.Handler) http.Handler {
-	const hdrRequestID = "X-Request-Id"
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get(hdrRequestID)
-		if id == "" {
-			u, _ := uuid.NewV7()
-			id = u.String()
-		}
-
-		ctx := context.WithValue(r.Context(), requestKey, id)
-
-		sw := &statusWriter{ResponseWriter: w}
-		sw.Header().Set(hdrRequestID, id)
-
-		logger.Debug("request received",
-			"id", id,
-			"path", r.URL.Path,
-			"method", r.Method,
-			"remote", r.RemoteAddr,
-		)
-
-		defer func(start time.Time) {
-			logger.Debug("request completed",
-				"id", id,
-				"status", sw.status,
-				"bytes", sw.n,
-				"duration", time.Since(start).String(),
-			)
-		}(time.Now())
-
-		h.ServeHTTP(sw, r.WithContext(ctx))
-	})
-}
-
-func withMeta(h http.Handler) http.Handler {
-	const (
-		hdrConfigSHA = "X-Config-Sha"
-		hdrVersion   = "X-Execd-Version"
-	)
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(hdrConfigSHA, config.sha)
-		w.Header().Set(hdrVersion, Version)
-
-		h.ServeHTTP(w, r)
-	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -512,11 +646,12 @@ var internalEndpoints = []Endpoint{
 	},
 }
 
-func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()]) *http.ServeMux {
+func newAPIRoutes(ctx context.Context, sess *sessions, cancelableJobs *safeMap[string, func()], password string, ttl time.Duration) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	for _, e := range config.Endpoints {
-		h, token := newExecHandler(ctx, e, cancelableJobs), config.Server.Token
+		h := newExecHandler(ctx, e, cancelableJobs)
+
 		pattern := fmt.Sprintf(
 			"%s %s",
 			strings.ToUpper(e.method),
@@ -524,23 +659,50 @@ func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()]) 
 		)
 
 		mux.Handle(pattern, chain(h,
-			withAuth(token, e.NoAuth),
+			withSecurityHeaders,
+			withAuth(password, e.NoAuth, sess),
 			withMeta,
 			withTracing,
 		))
 	}
 
+	mux.Handle("POST /login", chain(newLoginHandler(password, ttl, sess),
+		withSecurityHeaders,
+		withMeta,
+		withTracing,
+	))
+
+	mux.Handle("POST /logout", chain(newLogoutHandler(sess),
+		withSecurityHeaders,
+		withAuth(password, false, sess),
+		withMeta,
+		withTracing,
+	))
+
+	mux.Handle("GET /me", chain(newMeHandler(),
+		withSecurityHeaders,
+		withAuth(password, false, sess),
+		withMeta,
+		withTracing,
+	))
+
 	mux.Handle("GET /jobs/{id}", chain(newJobHandler(ctx, cancelableJobs),
+		withSecurityHeaders,
+		withAuth(password, false, sess),
 		withMeta,
 		withTracing,
 	))
 
 	mux.Handle("GET /jobs", chain(newJobsHandler(),
+		withSecurityHeaders,
+		withAuth(password, false, sess),
 		withMeta,
 		withTracing,
 	))
 
 	mux.Handle("GET /user-routes", chain(newUserRoutesHandler(append(internalEndpoints, config.Endpoints...)),
+		withSecurityHeaders,
+		withAuth(password, false, sess),
 		withMeta,
 		withTracing,
 	))

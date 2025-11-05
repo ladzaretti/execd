@@ -16,7 +16,7 @@ import (
 type Server struct {
 	LogLevel   string `json:"log_level,omitempty"     toml:"log_level,commented"`
 	DBPath     string `json:"database_path,omitempty" toml:"database_path,commented"`
-	Token      string `json:"token,omitempty"         toml:"token,commented"`
+	Password   string `json:"password,omitempty"      toml:"password,commented"`
 	ListenAddr string `json:"listen_addr,omitempty"   toml:"listen_addr,commented"`
 	CertFile   string `json:"cert_file,omitempty"     toml:"cert_file,commented"`
 	KeyFile    string `json:"key_file,omitempty"      toml:"key_file,commented"`
@@ -37,8 +37,8 @@ func (c *Config) validate() error {
 		return errors.New("listen_addr must not be empty")
 	}
 
-	if c.Server.Token == "" {
-		return errors.New("server token must not be empty")
+	if c.Server.Password == "" {
+		return errors.New("server password must not be empty")
 	}
 
 	if _, _, err := net.SplitHostPort(c.Server.ListenAddr); err != nil {
@@ -61,7 +61,7 @@ func (c *Config) validate() error {
 		}
 
 		if e.NoAuth {
-			logger.Warn("endpoint registered without token protection (unsafe mode enabled)",
+			logger.Warn("endpoint registered without password protection (unsafe mode enabled)",
 				"path", e.Path,
 				"index", i,
 			)
@@ -95,8 +95,8 @@ func (c *Config) redact() *Config {
 	redacted := *c
 	redacted.Endpoints = append([]Endpoint(nil), redacted.Endpoints...)
 
-	if redacted.Server.Token != "" {
-		redacted.Server.Token = redact
+	if redacted.Server.Password != "" {
+		redacted.Server.Password = redact
 	}
 
 	return &redacted
