@@ -5,7 +5,7 @@ BIN_NAME ?= execd
 VERSION ?= v0.0.0
 
 # renovate: datasource=github-releases depName=golangci/golangci-lint
-GOLANGCI_VERSION ?= v2.5.0
+GOLANGCI_VERSION ?= v2.12.0
 TEST_ARGS = -v -timeout 40s -coverpkg=./...
 
 PKG_PATH ?= main
@@ -13,8 +13,8 @@ LDFLAGS=-X 'main.Version=$(VERSION)'
 
 bin/golangci-lint-$(GOLANGCI_VERSION):
 	@mkdir -p bin
-	curl -sfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-    	| sh -s -- -b ./bin $(GOLANGCI_VERSION)
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+    	| sh -s $(GOLANGCI_VERSION)
 	@mv bin/golangci-lint "$@"
 
 bin/golangci-lint: bin/golangci-lint-$(GOLANGCI_VERSION)

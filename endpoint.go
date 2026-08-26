@@ -27,7 +27,10 @@ type resolvedEndpoint struct {
 	pathParams []string
 }
 
+//revive:disable:struct-tag // go-toml/v2 supports the commented TOML tag option.
 type Endpoint struct {
+	resolvedEndpoint
+
 	Summary      string   `json:"summary,omitempty"       toml:"summary,commented"`
 	Path         string   `json:"path,omitempty"          toml:"path,commented"`
 	Method       string   `json:"method,omitempty"        toml:"method,commented"`
@@ -38,9 +41,9 @@ type Endpoint struct {
 	GID          uint32   `json:"gid,omitempty"           toml:"gid,commented"`
 	Timeout      string   `json:"timeout,omitempty"       toml:"timeout,commented"`
 	NoAuth       bool     `json:"no_auth,omitempty"       toml:"no_auth,commented"`
-
-	resolvedEndpoint
 }
+
+//revive:enable:struct-tag
 
 func (e *Endpoint) validate() error {
 	if e.Path == "" {

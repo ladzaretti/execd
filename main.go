@@ -28,7 +28,6 @@ const (
 	defaultCacheDir   = ".execd.d"
 	defaultDBFilename = "execd.sqlite"
 	defaultListenAddr = ":8443"
-	defaultSessionTTL = 30 * time.Minute
 	redact            = "*****"
 )
 
@@ -38,7 +37,7 @@ var (
 	requests *requestStore
 )
 
-//nolint:revive // deep-exit: a cli only helper.
+//revive:disable:deep-exit // A cli only helper.
 func subcommands() {
 	if len(os.Args) == 1 {
 		return
@@ -57,9 +56,12 @@ func subcommands() {
 	}
 }
 
-//nolint:revive // deep-exit: allowed, mustInitialize is only called at startup
+//revive:enable:deep-exit
+
+//revive:disable:deep-exit // Startup failures must terminate the process.
 func mustInitialize() {
 	configPath := flag.String("config", "", "config file path")
+
 	flag.Parse()
 
 	if *configPath == "" {
@@ -105,6 +107,8 @@ func mustInitialize() {
 	requests = reqs
 }
 
+//revive:enable:deep-exit
+
 func hash(filename string) (string, error) {
 	f, err := os.Open(path.Clean(filename))
 	if err != nil {
@@ -133,10 +137,10 @@ func main() {
 
 	go cancelableJobs.periodicCompact(ctx, 60*time.Minute)
 
-	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, cancelableJobs, password, config.Server.sessionTTL)))
+	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, cancelableJobs, password)))
 
 	srv := &http.Server{
-		Addr:              config.Server.listenAddr,
+		Addr:              config.Server.resolvedListenAddr,
 		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{

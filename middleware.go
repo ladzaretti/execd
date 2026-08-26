@@ -70,15 +70,13 @@ func withAuth(password string, options ...authOption) func(h http.Handler) http.
 			}
 
 			if err := validateBearer(r.Header.Get("Authorization"), password); err != nil {
-				switch err {
-				case errInvalidBearer:
+				switch {
+				case errors.Is(err, errInvalidBearer):
 					w.Header().Set("WWW-Authenticate", "Bearer")
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
-
-				case errUnauthorized:
+				case errors.Is(err, errUnauthorized):
 					w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
-
 				default:
 					http.Error(w, "internal", http.StatusInternalServerError)
 				}

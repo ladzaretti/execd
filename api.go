@@ -355,7 +355,11 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(b)
 	w.n += n
 
-	return n, err
+	if err != nil {
+		return n, fmt.Errorf("write response: %v", err)
+	}
+
+	return n, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -403,7 +407,7 @@ func parseInt(s string, fallback int) (int, error) {
 
 	l, err := strconv.Atoi(s)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("parse integer: %v", err)
 	}
 
 	return l, nil
@@ -433,7 +437,7 @@ var internalEndpoints = []Endpoint{
 	},
 }
 
-func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()], password string, ttl time.Duration) *http.ServeMux {
+func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()], password string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	for _, e := range config.Endpoints {

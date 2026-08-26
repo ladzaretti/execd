@@ -14,11 +14,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-type resolvedServer struct {
-	listenAddr string
-	sessionTTL time.Duration
-}
-
+//revive:disable:struct-tag // go-toml/v2 supports the commented TOML tag option.
 type Server struct {
 	LogLevel   string `json:"log_level,omitempty"     toml:"log_level,commented"`
 	DBPath     string `json:"database_path,omitempty" toml:"database_path,commented"`
@@ -28,7 +24,7 @@ type Server struct {
 	KeyFile    string `json:"key_file,omitempty"      toml:"key_file,commented"`
 	SessionTTL string `json:"session_ttl,omitempty"   toml:"session_ttl,commented"`
 
-	resolvedServer
+	resolvedListenAddr string
 }
 
 type Config struct {
@@ -38,6 +34,8 @@ type Config struct {
 	configPath string
 	sha        string
 }
+
+//revive:enable:struct-tag
 
 func (c *Config) validate() error {
 	uid := os.Getuid()
@@ -99,13 +97,7 @@ func (c *Config) resolve() error {
 		return errors.New("cannot set defaults on nil config")
 	}
 
-	c.Server.listenAddr = cmp.Or(c.Server.ListenAddr, defaultListenAddr)
-	c.Server.sessionTTL = defaultSessionTTL
-
-	if c.Server.SessionTTL != "" {
-		t, _ := time.ParseDuration(c.Server.SessionTTL) // validated at [Config.validate]
-		c.Server.sessionTTL = t
-	}
+	c.Server.resolvedListenAddr = cmp.Or(c.Server.ListenAddr, defaultListenAddr)
 
 	return nil
 }
@@ -134,7 +126,7 @@ func (c *Config) complete() {
 func defaultConfigPath() (string, error) {
 	home, err := os.UserConfigDir()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("get user config directory: %v", err)
 	}
 
 	return filepath.Join(home, defaultConfigName), nil
@@ -152,7 +144,7 @@ func parseFileConfig(path string) (*Config, error) {
 
 	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read config file: %v", err)
 	}
 
 	var config Config
@@ -197,7 +189,7 @@ func parseLogLevel(s string) (slog.Level, error) {
 
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(s)); err != nil {
-		return lvl, err
+		return lvl, fmt.Errorf("parse log level: %v", err)
 	}
 
 	return lvl, nil

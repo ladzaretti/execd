@@ -64,7 +64,7 @@ func (rs *requestStore) open() (retErr error) {
 
 	//nolint:noctx //pragma configuration
 	if _, err := db.Exec("PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;"); err != nil {
-		return err
+		return fmt.Errorf("configure database: %v", err)
 	}
 
 	m := migrate.New(db, migrate.SQLiteDialect{})
@@ -82,7 +82,11 @@ func (rs *requestStore) close() error {
 		return nil
 	}
 
-	return rs.db.Close()
+	if err := rs.db.Close(); err != nil {
+		return fmt.Errorf("close database: %v", err)
+	}
+
+	return nil
 }
 
 func ensureDefaultCacheDir() (dir string, _ error) {
@@ -196,7 +200,7 @@ func (rs *requestStore) selectPage(ctx context.Context, cursor string, filters [
 
 	if len(filters) > 0 {
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(filters)), ",")
-		query += "AND state IN (" + placeholders + ") "
+		query += "AND state IN (" + placeholders + ") " //nolint:gosec // The generated text contains only bound sql placeholders.
 
 		for _, f := range filters {
 			args = append(args, f)
@@ -211,11 +215,11 @@ func (rs *requestStore) selectPage(ctx context.Context, cursor string, filters [
 		args = append(args, limit)
 	}
 
-	rows, err := rs.db.QueryContext(ctx, query, args...)
+	rows, err := rs.db.QueryContext(ctx, query, args...) //nolint:gosec // The query text is static except generated bound sql placeholders.
 	if err != nil {
 		return nil, fmt.Errorf("query requests: %v", err)
 	}
-	defer func() { _ = rows.Close() }() //nolint:wsl_v5
+	defer func() { _ = rows.Close() }()
 
 	requests := make([]RequestState, 0, 16)
 
@@ -263,7 +267,7 @@ func scanRequest(rows interface{ Scan(dest ...any) error }) (RequestState, error
 		&startedAt,
 		&completedAt,
 	); err != nil {
-		return RequestState{}, err
+		return RequestState{}, fmt.Errorf("scan request: %v", err)
 	}
 
 	req := RequestState{
@@ -302,12 +306,12 @@ func scanRequest(rows interface{ Scan(dest ...any) error }) (RequestState, error
 func (rs *requestStore) execContext(ctx context.Context, query string, args ...any) (int, error) {
 	res, err := rs.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("execute database query: %v", err)
 	}
 
 	insertID, err := res.LastInsertId()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("get last insert id: %v", err)
 	}
 
 	return int(insertID), nil

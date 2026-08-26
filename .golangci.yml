@@ -2,6 +2,24 @@ version: "2"
 
 linters:
   default: none
+  disable:
+    - cyclop
+    - depguard
+    - err113
+    - exhaustruct
+    - forbidigo
+    - funlen
+    - gochecknoglobals
+    - gocognit
+    - goconst
+    - gomodguard
+    - lll
+    - mnd
+    - noinlineerr
+    - nonamedreturns
+    - maintidx
+    - varnamelen
+    - wsl
   # run 'golangci-lint help linters' to see the list of supported linters
   enable:
     # Enabled by default
@@ -20,13 +38,12 @@ linters:
     - containedctx
     - contextcheck
     - copyloopvar
-    - cyclop
     - decorder
     - dogsled
     - dupl
     - dupword
     - durationcheck
-    - errcheck
+    - embeddedstructfieldcheck
     - errchkjson
     - errname
     - errorlint
@@ -34,33 +51,24 @@ linters:
     - exptostd
     - fatcontext
     - forcetypeassert
-    # - funlen
-    - ginkgolinter
     - gocheckcompilerdirectives
     - gochecknoinits
     - gochecksumtype
-    - gocognit
-    - goconst
     - gocritic
     - gocyclo
-    # - godot
-    # - godox
-    - goheader
+    - godot
     - gomoddirectives
-    - gomodguard
+    - gomodguard_v2
     - goprintffuncname
     - gosec
     - gosmopolitan
-    - govet
     - grouper
     - iface
-    - importas
     - inamedparam
-    - ineffassign
     - interfacebloat
     - intrange
+    - ireturn
     - loggercheck
-    - maintidx
     - makezero
     - mirror
     - misspell
@@ -78,7 +86,6 @@ linters:
     - perfsprint
     - prealloc
     - predeclared
-    - promlinter
     - protogetter
     - reassign
     - recvcheck
@@ -87,98 +94,48 @@ linters:
     - sloglint
     - spancheck
     - sqlclosecheck
-    - staticcheck
     - tagalign
-    # - tagliatelle
+    - tagliatelle
     - testableexamples
-    - testifylint
-    - testpackage
     - thelper
     - tparallel
     - unconvert
     - unparam
-    - unused
     - usestdlibvars
     - usetesting
     - wastedassign
     - whitespace
+    - wrapcheck
     - wsl_v5
-    - zerologlint
 
   settings:
-    tagalign:
-      align: true
-      sort: true
-      order:
-        - json
-        - yaml
-        - yml
-        - toml
-        - mapstructure
-        - binding
-        - validate
-    cyclop:
-      max-complexity: 15
-    gosec:
-      excludes:
-        - G104
     revive:
       enable-all-rules: true
       rules:
-        - name: max-public-structs
-          disabled: true
-        - name: import-shadowing
-          disabled: true
-        - name: struct-tag
-          arguments:
-            - "toml,commented"
         - name: add-constant
-          disabled: true
-        - name: bare-return
           disabled: true
         - name: cognitive-complexity
           disabled: true
         - name: cyclomatic
-          disabled: true
-        - name: exported
-          disabled: true
+          arguments:
+            - 15
         - name: line-length-limit
-          disabled: true
-        - name: package-comments
           disabled: true
         - name: function-length
           disabled: true
-        - name: unexported-return
+        - name: package-comments
           disabled: true
-        - name: var-naming
-          arguments:
-            - []
-            - []
-            - - skipPackageNameChecks: true
     wsl_v5:
-      allow-first-in-block: true
-      allow-whole-block: false
-      branch-max-lines: 2
-      enable: 
-        - err
+      allow-whole-block: true
+      branch-max-lines: 4
     nlreturn:
-      block-size: 4
+      block-size: 3
     errorlint:
       errorf: false
-    paralleltest:
-      ignore-missing: true
-    errcheck:
-      exclude-functions:
-        - fmt.Fprintf
-        - fmt.Fprint
-        - fmt.Fprintln
-        - (*github.com/ncruces/go-sqlite3.Stmt).BindText
-        - (*github.com/ncruces/go-sqlite3.Stmt).BindJSON
-        - (*github.com/ncruces/go-sqlite3.Stmt).BindInt64
-        - (*github.com/ncruces/go-sqlite3.Stmt).BindInt
-        - (*github.com/ncruces/go-sqlite3.Stmt).BindBlob
-        - (*github.com/ncruces/go-sqlite3.Stmt).Reset
-        - (*github.com/ncruces/go-sqlite3.Stmt).Close
+    tagliatelle:
+      case:
+        rules:
+          json: snake
 
 formatters:
   enable:
@@ -192,7 +149,7 @@ formatters:
           replacement: "any"
     goimports:
       local-prefixes:
-        - github.com/ladzaretti/vlt-cli
+        - github.com/ladzaretti/exec
 
 run:
   timeout: "3m"

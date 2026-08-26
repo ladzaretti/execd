@@ -19,6 +19,7 @@ func newSafeMap[K comparable, V any]() *safeMap[K, V] {
 	}
 }
 
+//nolint:ireturn // The map intentionally generic.
 func (sf *safeMap[K, V]) load(k K) (V, bool) {
 	sf.mu.RLock()
 	defer sf.mu.RUnlock()
