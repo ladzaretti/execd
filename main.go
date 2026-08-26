@@ -22,6 +22,11 @@ import (
 
 var Version = "v0.0.0"
 
+const usage = `Usage: %s [flags]
+The execd daemon exposes configured commands as authenticated HTTP endpoints.
+
+`
+
 const (
 	defaultUserPrefix = "/exec"
 	defaultConfigName = ".execd.toml"
@@ -60,17 +65,22 @@ func subcommands() {
 
 //revive:disable:deep-exit // Startup failures must terminate the process.
 func mustInitialize() {
-	configPath := flag.String("config", "", "config file path")
+	defaultPath, err := defaultConfigPath()
+	if err != nil {
+		logger.Error("resolve default config path", "err", err)
+		os.Exit(1)
+	}
+
+	configPath := flag.String("config", "", fmt.Sprintf("config file path (default: %s)", defaultPath))
+
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), usage, os.Args[0])
+		flag.PrintDefaults()
+	}
 
 	flag.Parse()
 
 	if *configPath == "" {
-		defaultPath, err := defaultConfigPath()
-		if err != nil {
-			logger.Error("resolve default config path", "err", err)
-			os.Exit(1)
-		}
-
 		*configPath = defaultPath
 	}
 
