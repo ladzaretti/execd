@@ -3,13 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"mime"
 	"net/http"
 	"slices"
 	"strconv"
@@ -336,218 +331,6 @@ func newUserRoutesHandler(endpoints []Endpoint) http.Handler {
 	})
 }
 
-type session struct {
-	csrf string
-	ttl  time.Duration
-	iat  time.Time
-	exp  time.Time
-}
-
-func newSession(ttl time.Duration) (session, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return session{}, err
-	}
-
-	var (
-		csrf = base64.RawURLEncoding.EncodeToString(raw)
-		now  = time.Now()
-	)
-
-	return session{
-		csrf: csrf,
-		ttl:  ttl,
-		iat:  now,
-		exp:  now.Add(ttl),
-	}, nil
-}
-
-type sessions struct {
-	m *safeMap[string, session]
-}
-
-func newSessions() *sessions { return &sessions{m: newSafeMap[string, session]()} }
-
-func (sess *sessions) login(ttl time.Duration) (sid string, s session, err error) {
-	raw := make([]byte, 32)
-	if _, err = rand.Read(raw); err != nil {
-		return "", session{}, fmt.Errorf("sid: %w", err)
-	}
-
-	sid = base64.RawURLEncoding.EncodeToString(raw)
-
-	s, err = newSession(ttl)
-	if err != nil {
-		return "", session{}, fmt.Errorf("new session: %w", err)
-	}
-
-	sess.m.store(sid, s)
-
-	return sid, s, nil
-}
-
-func (sess *sessions) logout(sid string) bool {
-	_, ok := sess.m.load(sid)
-	if ok {
-		sess.m.delete(sid)
-	}
-
-	return ok
-}
-
-func (sess *sessions) valid(sid string) (session, bool) {
-	s, ok := sess.m.load(sid)
-	if !ok || time.Now().After(s.exp) {
-		return session{}, false
-	}
-
-	return s, true
-}
-
-func (sess *sessions) touch(sid string) bool {
-	s, ok := sess.valid(sid)
-	if !ok {
-		return false
-	}
-
-	s.exp = time.Now().Add(s.ttl)
-
-	sess.m.store(sid, s)
-
-	return true
-}
-
-func (sess *sessions) periodicCompact(ctx context.Context, interval time.Duration) {
-	sess.m.periodicCompact(ctx, interval)
-}
-
-func newLoginHandler(password string, ttl time.Duration, sess *sessions) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-
-		pass, err := readPassword(r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
-			time.Sleep(350 * time.Millisecond) // delay to reduce timing/bruteforce signal
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-
-			return
-		}
-
-		sid, s, err := sess.login(ttl)
-		if err != nil {
-			http.Error(w, "internal", http.StatusInternalServerError)
-			return
-		}
-
-		setSessionCookies(w, sid, s.csrf, s.ttl)
-
-		w.WriteHeader(http.StatusNoContent)
-	})
-}
-
-var errMissingPassword = errors.New("missing password")
-
-func readPassword(r *http.Request) (string, error) {
-	contentType := r.Header.Get("Content-Type")
-
-	mediatype, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return "", fmt.Errorf("read password: %w", err)
-	}
-
-	switch mediatype {
-	case "application/x-www-form-urlencoded", "multipart/form-data", "":
-		if err := r.ParseForm(); err != nil {
-			return "", fmt.Errorf("read form password: %w", err)
-		}
-
-		p := r.Form.Get("password")
-		if p == "" {
-			return "", errMissingPassword
-		}
-
-		return p, nil
-
-	case "application/json":
-		var body struct {
-			Password string `json:"password"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			return "", fmt.Errorf("read json password: %w", err)
-		}
-
-		if body.Password == "" {
-			return "", errMissingPassword
-		}
-
-		return body.Password, nil
-
-	default:
-		return "", fmt.Errorf("unsupported content-type: %s", contentType)
-	}
-}
-
-func setSessionCookies(w http.ResponseWriter, sid, csrf string, ttl time.Duration) {
-	maxAge := int(ttl.Seconds())
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "sid",
-		Value:    sid,
-		Path:     "/",
-		MaxAge:   maxAge,
-		SameSite: http.SameSiteStrictMode,
-		Secure:   true,
-		HttpOnly: true,
-	})
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "csrf",
-		Value:    csrf,
-		Path:     "/",
-		MaxAge:   maxAge,
-		SameSite: http.SameSiteStrictMode,
-		Secure:   true,
-	})
-}
-
-func newLogoutHandler(sess *sessions) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sidCookie, err := r.Cookie("sid")
-		if err == nil && sidCookie.Value != "" {
-			sess.logout(sidCookie.Value)
-		}
-
-		expireCookie := func(name string) {
-			http.SetCookie(w, &http.Cookie{
-				Name:     name,
-				Value:    "",
-				Path:     "/",
-				MaxAge:   -1,
-				SameSite: http.SameSiteStrictMode,
-				Secure:   true,
-				HttpOnly: name == "sid",
-			})
-		}
-
-		expireCookie("sid")
-		expireCookie("csrf")
-
-		w.WriteHeader(http.StatusNoContent)
-	})
-}
-
-func newMeHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-}
-
 type ctxKey string
 
 var requestKey ctxKey = "requestKey"
@@ -650,7 +433,7 @@ var internalEndpoints = []Endpoint{
 	},
 }
 
-func newAPIRoutes(ctx context.Context, sess *sessions, cancelableJobs *safeMap[string, func()], password string, ttl time.Duration) *http.ServeMux {
+func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()], password string, ttl time.Duration) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	for _, e := range config.Endpoints {
@@ -664,49 +447,29 @@ func newAPIRoutes(ctx context.Context, sess *sessions, cancelableJobs *safeMap[s
 
 		mux.Handle(pattern, chain(h,
 			withSecurityHeaders,
-			withAuth(password, e.NoAuth, sess),
+			withAuth(password, authEnabled(!e.NoAuth)),
 			withMeta,
 			withTracing,
 		))
 	}
 
-	mux.Handle("POST /login", chain(newLoginHandler(password, ttl, sess),
-		withSecurityHeaders,
-		withMeta,
-		withTracing,
-	))
-
-	mux.Handle("POST /logout", chain(newLogoutHandler(sess),
-		withSecurityHeaders,
-		withAuth(password, false, sess),
-		withMeta,
-		withTracing,
-	))
-
-	mux.Handle("GET /me", chain(newMeHandler(),
-		withSecurityHeaders,
-		withAuth(password, false, sess),
-		withMeta,
-		withTracing,
-	))
-
 	mux.Handle("GET /jobs/{id}", chain(newJobHandler(ctx, cancelableJobs),
 		withSecurityHeaders,
-		withAuth(password, false, sess),
+		withAuth(password),
 		withMeta,
 		withTracing,
 	))
 
 	mux.Handle("GET /jobs", chain(newJobsHandler(),
 		withSecurityHeaders,
-		withAuth(password, false, sess),
+		withAuth(password),
 		withMeta,
 		withTracing,
 	))
 
 	mux.Handle("GET /user-routes", chain(newUserRoutesHandler(append(internalEndpoints, config.Endpoints...)),
 		withSecurityHeaders,
-		withAuth(password, false, sess),
+		withAuth(password),
 		withMeta,
 		withTracing,
 	))

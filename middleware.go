@@ -3,11 +3,17 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+)
+
+var (
+	errInvalidBearer = errors.New("invalid bearer authorization")
+	errUnauthorized  = errors.New("unauthorized")
 )
 
 func chain(h http.Handler, middlewares ...func(h http.Handler) http.Handler) http.Handler {
@@ -18,87 +24,67 @@ func chain(h http.Handler, middlewares ...func(h http.Handler) http.Handler) htt
 	return h
 }
 
-func withAuth(password string, unsafe bool, sess *sessions) func(h http.Handler) http.Handler { //nolint:revive,cyclop,gocognit
+type authConfig struct {
+	enabled bool
+}
+
+type authOption func(*authConfig)
+
+func authEnabled(enabled bool) authOption {
+	return func(config *authConfig) {
+		config.enabled = enabled
+	}
+}
+
+func withAuth(password string, options ...authOption) func(h http.Handler) http.Handler {
+	config := authConfig{enabled: true}
+	for _, opt := range options {
+		opt(&config)
+	}
+
 	const bearerPrefix = "Bearer "
 
-	eq := func(a, b string) bool {
-		if len(a) != len(b) {
-			return false
+	validateBearer := func(auth, password string) error {
+		if len(auth) < len(bearerPrefix) {
+			return errInvalidBearer
 		}
 
-		return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-	}
+		bearerReceived, passwordReceived := auth[:len(bearerPrefix)], strings.TrimSpace(auth[len(bearerPrefix):])
 
-	mutating := func(m string) bool {
-		switch m {
-		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-			return true
-
-		default:
-			return false
-		}
-	}
-
-	validateBearer := func(w http.ResponseWriter, auth string) (ok bool) {
-		if len(auth) < len(bearerPrefix) || !strings.EqualFold(auth[:len(bearerPrefix)], bearerPrefix) {
-			w.Header().Set("WWW-Authenticate", `Bearer"`)
-
-			return false
+		if !strings.EqualFold(bearerReceived, bearerPrefix) {
+			return errInvalidBearer
 		}
 
-		got := strings.TrimSpace(auth[len(bearerPrefix):])
-		if !eq(got, password) {
-			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-
-			return false
+		if subtle.ConstantTimeCompare([]byte(passwordReceived), []byte(password)) != 1 {
+			return errUnauthorized
 		}
 
-		return true
+		return nil
 	}
 
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodOptions || unsafe {
+			if !config.enabled {
 				h.ServeHTTP(w, r)
 				return
 			}
 
-			if auth := r.Header.Get("Authorization"); auth != "" {
-				if validateBearer(w, auth) {
-					h.ServeHTTP(w, r)
+			if err := validateBearer(r.Header.Get("Authorization"), password); err != nil {
+				switch err {
+				case errInvalidBearer:
+					w.Header().Set("WWW-Authenticate", "Bearer")
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+				case errUnauthorized:
+					w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+				default:
+					http.Error(w, "internal", http.StatusInternalServerError)
 				}
 
 				return
 			}
-
-			sidC, err := r.Cookie("sid")
-			if err != nil || sidC == nil || sidC.Value == "" {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-
-				return
-			}
-
-			s, ok := sess.valid(sidC.Value)
-			if !ok {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-
-				return
-			}
-
-			if mutating(r.Method) {
-				csrfC, _ := r.Cookie("csrf")
-				tokenHdr := r.Header.Get("X-Csrf-Token")
-
-				if csrfC == nil || csrfC.Value == "" ||
-					!eq(tokenHdr, csrfC.Value) || !eq(csrfC.Value, s.csrf) {
-					http.Error(w, "csrf", http.StatusForbidden)
-
-					return
-				}
-			}
-
-			_ = sess.touch(sidC.Value)
 
 			h.ServeHTTP(w, r)
 		})

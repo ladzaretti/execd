@@ -126,21 +126,14 @@ func main() {
 
 	mustInitialize()
 
-	var (
-		sess     = newSessions()
-		rr       = newRenderer()
-		password = config.Server.Password
-	)
+	password := config.Server.Password
 
 	root, cancelableJobs := http.NewServeMux(), newSafeMap[string, func()]()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
-	go sess.periodicCompact(ctx, 60*time.Minute)
 	go cancelableJobs.periodicCompact(ctx, 60*time.Minute)
 
-	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, sess, cancelableJobs, password, config.Server.sessionTTL)))
-	root.Handle("/hx/", http.StripPrefix("/hx", newHXRoutes(rr, sess, password)))
-	root.Handle("/ui/", http.StripPrefix("/ui", newUIRoutes(rr, sess, password)))
+	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, cancelableJobs, password, config.Server.sessionTTL)))
 
 	srv := &http.Server{
 		Addr:              config.Server.listenAddr,
