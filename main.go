@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -32,7 +33,6 @@ const (
 	defaultConfigName = ".execd.toml"
 	defaultCacheDir   = ".execd.d"
 	defaultDBFilename = "execd.sqlite"
-	defaultListenAddr = ":8443"
 	redact            = "*****"
 )
 
@@ -74,7 +74,8 @@ func mustInitialize() {
 	configPath := flag.String("config", "", fmt.Sprintf("config file path (default: %s)", defaultPath))
 
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), usage, os.Args[0])
+		_, _ = fmt.Fprintf(flag.CommandLine.Output(), usage, os.Args[0])
+
 		flag.PrintDefaults()
 	}
 
@@ -122,14 +123,14 @@ func mustInitialize() {
 func hash(filename string) (string, error) {
 	f, err := os.Open(path.Clean(filename))
 	if err != nil {
-		return "", nil
+		return "", fmt.Errorf("open file: %v", err)
 	}
 
 	defer func() { _ = f.Close() }()
 
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return "", nil
+		return "", fmt.Errorf("hash file: %v", err)
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
@@ -144,13 +145,15 @@ func main() {
 
 	root, cancelableJobs := http.NewServeMux(), newSafeMap[string, func()]()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	workers := &sync.WaitGroup{}
 
 	go cancelableJobs.periodicCompact(ctx, 60*time.Minute)
 
-	root.Handle("/api/", http.StripPrefix("/api", newAPIRoutes(ctx, cancelableJobs, password)))
+	root.Handle(defaultUserPrefix+"/", newExecRoutes(ctx, cancelableJobs, workers, password))
+	root.Handle("/", newAPIRoutes(cancelableJobs, password))
 
 	srv := &http.Server{
-		Addr:              config.Server.resolvedListenAddr,
+		Addr:              config.Server.ListenAddr,
 		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{
@@ -166,15 +169,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("server listening", "addr", l.Addr().String())
+	protocol := "http"
+	if config.Server.TLS {
+		protocol = "https"
+	}
+
+	logger.Info("server listening", "addr", l.Addr().String(), "protocol", protocol)
 
 	errCh := make(chan error, 1)
 	go func(ch chan error) {
-		ch <- srv.ServeTLS(
-			l,
-			config.Server.CertFile,
-			config.Server.KeyFile,
-		)
+		if config.Server.TLS {
+			ch <- srv.ServeTLS(
+				l,
+				config.Server.CertFile,
+				config.Server.KeyFile,
+			)
+		} else {
+			ch <- srv.Serve(l)
+		}
 
 		close(ch)
 	}(errCh)
@@ -195,14 +207,17 @@ func main() {
 
 	cancel()
 
-	_ = requests.close()
-
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server shutdown error", "err", err)
 	}
 
 	shutdownCancel()
+	workers.Wait()
+
+	if err := requests.close(); err != nil {
+		logger.Error("close request store", "err", err)
+	}
 
 	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server exit error", "err", err)

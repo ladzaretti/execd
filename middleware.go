@@ -105,7 +105,13 @@ func withTracing(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(hdrRequestID)
 		if id == "" {
-			u, _ := uuid.NewV7()
+			u, err := uuid.NewV7()
+			if err != nil {
+				http.Error(w, "generate request ID", http.StatusInternalServerError)
+
+				return
+			}
+
 			id = u.String()
 		}
 

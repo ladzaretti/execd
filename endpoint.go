@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -72,6 +73,10 @@ func (e *Endpoint) validate() error {
 		return fmt.Errorf("invalid route path %q: must not end with '/'", e.Path)
 	}
 
+	if path.Clean(e.Path) != e.Path {
+		return fmt.Errorf("invalid route path %q: must not contain dot segments", e.Path)
+	}
+
 	if len(e.Cmd) == 0 || e.Cmd[0] == "" {
 		return errors.New("cmd must be a non-empty argv")
 	}
@@ -95,22 +100,68 @@ func (e *Endpoint) resolve() {
 		e.timeout = t
 	}
 
-	e.path = filepath.Join(defaultUserPrefix, e.Path)
+	e.path = path.Join(defaultUserPrefix, e.Path)
 	e.pathParams = make([]string, 0, 4)
 
 	matches := re.FindAllStringSubmatch(e.Path, -1)
 	for _, v := range matches {
-		e.pathParams = append(e.pathParams, v[1])
+		e.pathParams = append(e.pathParams, strings.TrimSuffix(v[1], "..."))
 	}
 }
 
 type ExecResult struct {
-	Stdout   string `json:"stdout,omitempty"`
-	Stderr   string `json:"stderr,omitempty"`
-	Detached bool   `json:"detached,omitempty"`
-	PID      *int   `json:"pid,omitempty"`
-	ExitCode *int   `json:"exit_code,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Stdout          string `json:"stdout,omitempty"`
+	Stderr          string `json:"stderr,omitempty"`
+	OutputTruncated bool   `json:"output_truncated,omitempty"`
+	Detached        bool   `json:"detached,omitempty"`
+	PID             *int   `json:"pid,omitempty"`
+	ExitCode        *int   `json:"exit_code,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
+const (
+	maxCapturedOutputBytes = 1 << 20
+	commandTermGrace       = 5 * time.Second
+	commandWaitDelay       = 10 * time.Second
+)
+
+type limitedBuffer struct {
+	bytes.Buffer
+
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := maxCapturedOutputBytes - b.Len()
+
+	if remaining < n {
+		b.truncated = true
+
+		if remaining <= 0 {
+			return n, nil
+		}
+
+		p = p[:remaining]
+	}
+
+	_, _ = b.Buffer.Write(p)
+
+	return n, nil
+}
+
+func validateRoutePattern(method, endpointPath string) (err error) {
+	pattern := fmt.Sprintf("%s %s", strings.ToUpper(cmp.Or(method, http.MethodPost)), path.Join(defaultUserPrefix, endpointPath))
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("invalid route pattern %q: %v", pattern, recovered)
+		}
+	}()
+
+	http.NewServeMux().Handle(pattern, http.NotFoundHandler())
+
+	return nil
 }
 
 func (e *Endpoint) run(ctx context.Context, env []string) *ExecResult {
@@ -132,15 +183,16 @@ func (e *Endpoint) runWait(ctx context.Context, env []string) *ExecResult {
 	// #nosec G204 // command and args come from trusted config
 	cmd := exec.CommandContext(ctx, e.command, e.args...)
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr limitedBuffer
 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-
 	cmd.Env = slices.Concat(e.env, env)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = gracefulCancel(cmd)
+	cmd.WaitDelay = commandWaitDelay
 
 	if e.UID != 0 || e.GID != 0 {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
 		cmd.SysProcAttr.Credential = &syscall.Credential{
 			Uid: e.UID,
 			Gid: e.GID,
@@ -163,19 +215,51 @@ func (e *Endpoint) runWait(ctx context.Context, env []string) *ExecResult {
 
 	execResult.Stdout = stdout.String()
 	execResult.Stderr = stderr.String()
+	execResult.OutputTruncated = stdout.truncated || stderr.truncated
 	execResult.ExitCode = &exitCode
 
 	return &execResult
+}
+
+func gracefulCancel(cmd *exec.Cmd) func() error {
+	var killOnce sync.Once
+
+	return func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+
+		pid := cmd.Process.Pid
+
+		err := syscall.Kill(pid, syscall.SIGTERM)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+
+		if err != nil {
+			return fmt.Errorf("terminate process: %v", err)
+		}
+
+		killOnce.Do(func() {
+			time.AfterFunc(commandTermGrace, func() {
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+			})
+		})
+
+		return nil
+	}
 }
 
 func (e *Endpoint) runDetached(env []string) *ExecResult {
 	cmd := exec.Command(e.command, e.args...) //nolint:gosec,noctx // command and args come from trusted config // noctx is intentional
 	cmd.Env = slices.Concat(e.env, env)
 
-	if f, err := os.OpenFile("/dev/null", os.O_WRONLY, 0); err == nil {
-		cmd.Stdout, cmd.Stderr, cmd.Stdin = f, f, nil
-	} else {
+	if f, err := os.OpenFile("/dev/null", os.O_WRONLY, 0); err != nil {
 		cmd.Stdout, cmd.Stderr, cmd.Stdin = nil, nil, nil
+	} else {
+		defer func() { _ = f.Close() }()
+
+		cmd.Stdout, cmd.Stderr, cmd.Stdin = f, f, nil
 	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{

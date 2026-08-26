@@ -4,13 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
+
+	"github.com/google/uuid"
 )
 
 type execState string
@@ -21,6 +27,11 @@ const (
 	execStateCompleted execState = "completed"
 	execStateFailed    execState = "failed"
 	execStateCanceled  execState = "canceled"
+)
+
+const (
+	defaultJobsPageSize = 100
+	maxJobsPageSize     = 1000
 )
 
 var allowedHTTPMethods = []string{
@@ -40,19 +51,15 @@ type RequestState struct {
 	CompletedAt time.Time  `json:"completed_at,omitzero,omitempty"`
 }
 
-func newExecHandler(appCtx context.Context, e Endpoint, cancelableJobs *safeMap[string, func()]) http.Handler {
+func newExecHandler(appCtx context.Context, workers *sync.WaitGroup, e Endpoint, cancelableJobs *safeMap[string, func()]) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		v, ok := r.Context().Value(requestKey).(string)
-		if !ok {
-			v = ""
+		u, err := uuid.NewV7()
+		if err != nil {
+			http.Error(w, "generate job ID", http.StatusInternalServerError)
+			return
 		}
 
-		id := v
-
-		w.Header().Set("Location", "/jobs/"+id)
-		writeJSON(w, http.StatusAccepted, struct {
-			ID string `json:"id,omitempty"`
-		}{ID: id})
+		id := u.String()
 
 		rs := RequestState{
 			State:     execStateQueued,
@@ -60,10 +67,25 @@ func newExecHandler(appCtx context.Context, e Endpoint, cancelableJobs *safeMap[
 			Path:      e.path,
 		}
 		if _, err := requests.insert(appCtx, id, rs); err != nil {
-			logger.Error("error saving new request to database", "err", err)
+			logger.Error("save new request to database", "err", err)
+			http.Error(w, "save request", http.StatusInternalServerError)
+
+			return
 		}
 
-		go runRequest(appCtx, e, cancelableJobs, id, paramsToEnv(r, e.pathParams))
+		location := path.Join("/", "jobs", url.PathEscape(id))
+		w.Header().Set("Location", location)
+		writeJSON(w, http.StatusAccepted, struct {
+			ID       string `json:"id,omitempty"`
+			Location string `json:"location,omitempty"`
+		}{
+			ID:       id,
+			Location: location,
+		})
+
+		workers.Go(func() {
+			runRequest(appCtx, e, cancelableJobs, id, paramsToEnv(r, e.pathParams))
+		})
 	})
 }
 
@@ -71,10 +93,13 @@ func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string,
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cancelableJobs.store(id, cancel)
+	persistenceCtx := context.WithoutCancel(ctx)
 
-	if _, err := requests.updateState(ctx, id, execStateRunning); err != nil {
-		logger.Error("error persisting running request state", "err", err)
+	cancelableJobs.store(id, cancel)
+	defer cancelableJobs.delete(id)
+
+	if _, err := requests.updateState(persistenceCtx, id, execStateRunning); err != nil {
+		logger.Error("persist running request", "err", err)
 	}
 
 	execResult := e.run(ctx, env)
@@ -88,28 +113,30 @@ func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string,
 		completed.Result = *execResult
 	}
 
-	if execResult.Error != "" || (execResult.ExitCode != nil && *execResult.ExitCode != 0) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		completed.State = execStateCanceled
+	} else if execResult.Error != "" ||
+		(execResult.ExitCode != nil && *execResult.ExitCode != 0) {
 		completed.State = execStateFailed
 	}
 
-	if _, err := requests.complete(ctx, id, completed); err != nil {
-		logger.Error("error persisting completed request data", "err", err)
+	if _, err := requests.complete(persistenceCtx, id, completed); err != nil {
+		logger.Error("persist completed request", "err", err)
 	}
-
-	cancelableJobs.delete(id)
 }
 
 func newJobsHandler() http.Handler {
 	type JobsSummary struct {
-		ID          string    `json:"id,omitempty"`
-		Path        string    `json:"path,omitempty"`
-		State       execState `json:"state,omitempty"`
-		Detached    bool      `json:"detached,omitempty"`
-		PID         *int      `json:"pid,omitempty"`
-		ExitCode    *int      `json:"exit_code,omitempty"`
-		Error       string    `json:"error,omitempty"`
-		StartedAt   time.Time `json:"started_at,omitzero"`
-		CompletedAt time.Time `json:"completed_at,omitzero"`
+		ID              string    `json:"id,omitempty"`
+		Path            string    `json:"path,omitempty"`
+		State           execState `json:"state,omitempty"`
+		Detached        bool      `json:"detached,omitempty"`
+		OutputTruncated bool      `json:"output_truncated,omitempty"`
+		PID             *int      `json:"pid,omitempty"`
+		ExitCode        *int      `json:"exit_code,omitempty"`
+		Error           string    `json:"error,omitempty"`
+		StartedAt       time.Time `json:"started_at,omitzero"`
+		CompletedAt     time.Time `json:"completed_at,omitzero"`
 	}
 
 	allowedFilters := []string{
@@ -142,12 +169,7 @@ func newJobsHandler() http.Handler {
 			q.Set("limit", strconv.Itoa(limit))
 			u.RawQuery = q.Encode()
 
-			scheme := "http"
-			if r.TLS != nil {
-				scheme = "https"
-			}
-
-			u.Scheme, u.Host = scheme, r.Host
+			u.Scheme, u.Host = "", ""
 
 			w.Header().Set("Link", fmt.Sprintf("<%s>; rel=\"next\"", u.String()))
 		}
@@ -157,15 +179,16 @@ func newJobsHandler() http.Handler {
 
 	convert := func(r RequestState) JobsSummary {
 		return JobsSummary{
-			ID:          r.UUID,
-			Path:        r.Path,
-			State:       r.State,
-			Detached:    r.Result.Detached,
-			PID:         r.Result.PID,
-			ExitCode:    r.Result.ExitCode,
-			Error:       r.Result.Error,
-			StartedAt:   r.StartedAt,
-			CompletedAt: r.CompletedAt,
+			ID:              r.UUID,
+			Path:            r.Path,
+			State:           r.State,
+			Detached:        r.Result.Detached,
+			OutputTruncated: r.Result.OutputTruncated,
+			PID:             r.Result.PID,
+			ExitCode:        r.Result.ExitCode,
+			Error:           r.Result.Error,
+			StartedAt:       r.StartedAt,
+			CompletedAt:     r.CompletedAt,
 		}
 	}
 
@@ -178,13 +201,14 @@ func newJobsHandler() http.Handler {
 		}
 
 		var (
-			cursor     = r.URL.Query().Get("cursor")
-			pagination = len(r.URL.Query().Get("limit")) > 0
-			filters    = make([]string, 0, len(allowedFilters))
+			cursor  = r.URL.Query().Get("cursor")
+			filters = make([]string, 0, len(allowedFilters))
 		)
 
 		for _, s := range r.URL.Query()["filter"] {
-			filters = append(filters, strings.Split(s, ",")...)
+			for _, filter := range strings.Split(s, ",") {
+				filters = append(filters, strings.ToLower(strings.TrimSpace(filter)))
+			}
 		}
 
 		if !validateFilters(filters) {
@@ -199,21 +223,22 @@ func newJobsHandler() http.Handler {
 
 		raw := r.URL.Query().Get("limit")
 
-		limit, err := parseInt(raw, 0)
+		limit, err := parseInt(raw, defaultJobsPageSize)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("invalid limit: %s", err), http.StatusBadRequest)
 
 			return
 		}
 
-		additional := 0
-		if limit != 0 {
-			additional = 1
+		if limit <= 0 || limit > maxJobsPageSize {
+			http.Error(w, fmt.Sprintf("limit must be between 1 and %d", maxJobsPageSize), http.StatusBadRequest)
+
+			return
 		}
 
 		ctx := r.Context()
 
-		reqs, err := requests.selectPage(ctx, cursor, filters, limit+additional)
+		reqs, err := requests.selectPage(ctx, cursor, filters, limit+1)
 		if err != nil {
 			http.Error(
 				w,
@@ -235,7 +260,7 @@ func newJobsHandler() http.Handler {
 			page = summary
 		)
 
-		if pagination && len(summary) > limit {
+		if len(summary) > limit {
 			n := convert(reqs[limit])
 			next = &n
 
@@ -246,7 +271,7 @@ func newJobsHandler() http.Handler {
 	})
 }
 
-func newJobHandler(appCtx context.Context, cancelableJobs *safeMap[string, func()]) http.Handler {
+func newJobHandler(cancelableJobs *safeMap[string, func()]) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "" {
@@ -258,7 +283,6 @@ func newJobHandler(appCtx context.Context, cancelableJobs *safeMap[string, func(
 		case http.MethodGet:
 			ctx := r.Context()
 
-			//nolint:contextcheck // request ctx
 			job, err := requests.selectByUUID(ctx, id)
 			if err != nil {
 				http.Error(w, "job not found: "+err.Error(), http.StatusNotFound)
@@ -283,10 +307,6 @@ func newJobHandler(appCtx context.Context, cancelableJobs *safeMap[string, func(
 			cancel()
 
 			w.WriteHeader(http.StatusNoContent)
-
-			if _, err := requests.updateState(appCtx, id, execStateCanceled); err != nil {
-				logger.Error("error persisting canceled request state", "err", err)
-			}
 
 		default:
 			w.Header().Set("Allow", "GET, DELETE")
@@ -417,31 +437,31 @@ var internalEndpoints = []Endpoint{
 	{
 		Summary: "Retrieve job details by ID.",
 		resolvedEndpoint: resolvedEndpoint{
-			path:   "/jobs/{id}",
+			path:   path.Join("/", "jobs", "{id}"),
 			method: "GET",
 		},
 	},
 	{
 		Summary: "List recently completed jobs.",
 		resolvedEndpoint: resolvedEndpoint{
-			path:   "/jobs",
+			path:   path.Join("/", "jobs"),
 			method: "GET",
 		},
 	},
 	{
 		Summary: "List all user defined execution routes.",
 		resolvedEndpoint: resolvedEndpoint{
-			path:   "/user-routes",
+			path:   path.Join("/", "user-routes"),
 			method: "GET",
 		},
 	},
 }
 
-func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()], password string) *http.ServeMux {
+func newExecRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()], workers *sync.WaitGroup, password string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	for _, e := range config.Endpoints {
-		h := newExecHandler(ctx, e, cancelableJobs)
+		h := newExecHandler(ctx, workers, e, cancelableJobs)
 
 		pattern := fmt.Sprintf(
 			"%s %s",
@@ -457,7 +477,13 @@ func newAPIRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()], 
 		))
 	}
 
-	mux.Handle("GET /jobs/{id}", chain(newJobHandler(ctx, cancelableJobs),
+	return mux
+}
+
+func newAPIRoutes(cancelableJobs *safeMap[string, func()], password string) *http.ServeMux {
+	mux := http.NewServeMux()
+
+	mux.Handle("GET /jobs/{id}", chain(newJobHandler(cancelableJobs),
 		withSecurityHeaders,
 		withAuth(password),
 		withMeta,

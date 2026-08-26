@@ -1,15 +1,14 @@
 package main
 
 import (
-	"cmp"
+	"bytes"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
-	"time"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -20,11 +19,9 @@ type Server struct {
 	DBPath     string `json:"database_path,omitempty" toml:"database_path,commented"`
 	Password   string `json:"password,omitempty"      toml:"password,commented"`
 	ListenAddr string `json:"listen_addr,omitempty"   toml:"listen_addr,commented"`
+	TLS        bool   `json:"tls,omitempty"           toml:"tls,commented"`
 	CertFile   string `json:"cert_file,omitempty"     toml:"cert_file,commented"`
 	KeyFile    string `json:"key_file,omitempty"      toml:"key_file,commented"`
-	SessionTTL string `json:"session_ttl,omitempty"   toml:"session_ttl,commented"`
-
-	resolvedListenAddr string
 }
 
 type Config struct {
@@ -48,10 +45,8 @@ func (c *Config) validate() error {
 		return errors.New("server password must not be empty")
 	}
 
-	if c.Server.ListenAddr != "" {
-		if _, _, err := net.SplitHostPort(c.Server.ListenAddr); err != nil {
-			return fmt.Errorf("listen_addr must be host:port or :port: %v", err)
-		}
+	if _, _, err := net.SplitHostPort(c.Server.ListenAddr); err != nil {
+		return fmt.Errorf("listen_addr must be host:port or :port: %v", err)
 	}
 
 	_, err := parseLogLevel(c.Server.LogLevel)
@@ -59,15 +54,13 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid log level: %v", err)
 	}
 
-	if c.Server.SessionTTL != "" {
-		if _, err := time.ParseDuration(c.Server.SessionTTL); err != nil {
-			return fmt.Errorf("invalid session ttl duration %q", c.Server.SessionTTL)
-		}
-	}
-
 	seen := make(map[string]struct{}, len(c.Endpoints))
 	for i, e := range c.Endpoints {
 		if err := e.validate(); err != nil {
+			return fmt.Errorf("endpoint[%d]: %v", i, err)
+		}
+
+		if err := validateRoutePattern(e.Method, e.Path); err != nil {
 			return fmt.Errorf("endpoint[%d]: %v", i, err)
 		}
 
@@ -96,8 +89,6 @@ func (c *Config) resolve() error {
 	if c == nil {
 		return errors.New("cannot set defaults on nil config")
 	}
-
-	c.Server.resolvedListenAddr = cmp.Or(c.Server.ListenAddr, defaultListenAddr)
 
 	return nil
 }
@@ -148,11 +139,32 @@ func parseFileConfig(path string) (*Config, error) {
 	}
 
 	var config Config
-	if err := toml.Unmarshal(raw, &config); err != nil {
+	if err := toml.NewDecoder(bytes.NewReader(raw)).DisallowUnknownFields().Decode(&config); err != nil {
+		if strictErr, ok := errors.AsType[*toml.StrictMissingError](err); ok {
+			return nil, fmt.Errorf("config: unknown fields: %s", strings.Join(unknownFieldDetails(strictErr.Errors), ", "))
+		}
+
 		return nil, fmt.Errorf("config: parse file: %v", err)
 	}
 
 	return &config, nil
+}
+
+func unknownFieldDetails(decodeErrors []toml.DecodeError) []string {
+	unknownFields := make([]string, 0, len(decodeErrors))
+
+	for _, unknownField := range decodeErrors {
+		line, column := unknownField.Position()
+		unknownFields = append(unknownFields,
+			fmt.Sprintf("%q (line %d, column %d)",
+				strings.Join(unknownField.Key(), "."),
+				line,
+				column,
+			),
+		)
+	}
+
+	return unknownFields
 }
 
 func loadFileConfig(path string) (*Config, error) {
@@ -162,11 +174,7 @@ func loadFileConfig(path string) (*Config, error) {
 
 	c, err := parseFileConfig(path)
 	if err != nil {
-		if path != "" || !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("load config %s: %v", path, err)
-		}
-
-		c = &Config{}
+		return nil, fmt.Errorf("load config %s: %v", path, err)
 	}
 
 	if err := c.validate(); err != nil {

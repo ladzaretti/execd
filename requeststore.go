@@ -133,6 +133,7 @@ const completeQuery = `
 		stdout = ?,
 		stderr = ?,
 		detached = ?,
+		output_truncated = ?,
 		pid = NULLIF(?, 0),
 		exit_code = ?,
 		error = NULLIF(?, ""),
@@ -147,6 +148,7 @@ func (rs *requestStore) complete(ctx context.Context, uuid string, req RequestSt
 		req.Result.Stdout,
 		req.Result.Stderr,
 		req.Result.Detached,
+		req.Result.OutputTruncated,
 		req.Result.PID,
 		req.Result.ExitCode,
 		req.Result.Error,
@@ -162,6 +164,7 @@ const selectQuery = `
 		stdout,
 		stderr,
 		detached,
+		output_truncated,
 		pid,
 		exit_code,
 		error,
@@ -241,17 +244,18 @@ func (rs *requestStore) selectPage(ctx context.Context, cursor string, filters [
 
 func scanRequest(rows interface{ Scan(dest ...any) error }) (RequestState, error) {
 	var (
-		uuid        string
-		path        string
-		state       string
-		stdout      sql.NullString
-		stderr      sql.NullString
-		detached    sql.NullBool
-		pid         sql.NullInt64
-		exitCode    sql.NullInt64
-		errMsg      sql.NullString
-		startedAt   sql.NullString
-		completedAt sql.NullString
+		uuid            string
+		path            string
+		state           string
+		stdout          sql.NullString
+		stderr          sql.NullString
+		detached        sql.NullBool
+		outputTruncated sql.NullBool
+		pid             sql.NullInt64
+		exitCode        sql.NullInt64
+		errMsg          sql.NullString
+		startedAt       sql.NullString
+		completedAt     sql.NullString
 	)
 
 	if err := rows.Scan(
@@ -261,6 +265,7 @@ func scanRequest(rows interface{ Scan(dest ...any) error }) (RequestState, error
 		&stdout,
 		&stderr,
 		&detached,
+		&outputTruncated,
 		&pid,
 		&exitCode,
 		&errMsg,
@@ -275,10 +280,11 @@ func scanRequest(rows interface{ Scan(dest ...any) error }) (RequestState, error
 		Path:  path,
 		State: execState(state),
 		Result: ExecResult{
-			Stdout:   stdout.String,
-			Stderr:   stderr.String,
-			Detached: detached.Bool,
-			Error:    errMsg.String,
+			Stdout:          stdout.String,
+			Stderr:          stderr.String,
+			Detached:        detached.Bool,
+			OutputTruncated: outputTruncated.Bool,
+			Error:           errMsg.String,
 		},
 	}
 
