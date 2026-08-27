@@ -140,16 +140,18 @@ func withTracing(h http.Handler) http.Handler {
 	})
 }
 
-func withMeta(h http.Handler) http.Handler {
+func withMeta(configSHA string) func(http.Handler) http.Handler {
 	const (
 		hdrConfigSHA = "X-Config-Sha"
 		hdrVersion   = "X-Execd-Version"
 	)
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(hdrConfigSHA, config.sha)
-		w.Header().Set(hdrVersion, Version)
+	return func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set(hdrConfigSHA, configSHA)
+			w.Header().Set(hdrVersion, Version)
 
-		h.ServeHTTP(w, r)
-	})
+			h.ServeHTTP(w, r)
+		})
+	}
 }

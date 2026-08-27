@@ -51,7 +51,12 @@ type RequestState struct {
 	CompletedAt time.Time  `json:"completed_at,omitzero,omitempty"`
 }
 
-func newExecHandler(appCtx context.Context, workers *sync.WaitGroup, e Endpoint, cancelableJobs *safeMap[string, func()]) http.Handler {
+type api struct {
+	config   *Config
+	requests *requestStore
+}
+
+func (a *api) newExecHandler(appCtx context.Context, workers *sync.WaitGroup, e Endpoint, cancelableJobs *safeMap[string, func()]) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, err := uuid.NewV7()
 		if err != nil {
@@ -66,7 +71,7 @@ func newExecHandler(appCtx context.Context, workers *sync.WaitGroup, e Endpoint,
 			StartedAt: time.Now(),
 			Path:      e.path,
 		}
-		if _, err := requests.insert(appCtx, id, rs); err != nil {
+		if _, err := a.requests.insert(appCtx, id, rs); err != nil {
 			logger.Error("save new request to database", "err", err)
 			http.Error(w, "save request", http.StatusInternalServerError)
 
@@ -84,12 +89,12 @@ func newExecHandler(appCtx context.Context, workers *sync.WaitGroup, e Endpoint,
 		})
 
 		workers.Go(func() {
-			runRequest(appCtx, e, cancelableJobs, id, paramsToEnv(r, e.pathParams))
+			a.runRequest(appCtx, e, cancelableJobs, id, paramsToEnv(r, e.pathParams))
 		})
 	})
 }
 
-func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string, func()], id string, env []string) {
+func (a *api) runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string, func()], id string, env []string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -98,7 +103,7 @@ func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string,
 	cancelableJobs.store(id, cancel)
 	defer cancelableJobs.delete(id)
 
-	if _, err := requests.updateState(persistenceCtx, id, execStateRunning); err != nil {
+	if _, err := a.requests.updateState(persistenceCtx, id, execStateRunning); err != nil {
 		logger.Error("persist running request", "err", err)
 	}
 
@@ -120,12 +125,12 @@ func runRequest(ctx context.Context, e Endpoint, cancelableJobs *safeMap[string,
 		completed.State = execStateFailed
 	}
 
-	if _, err := requests.complete(persistenceCtx, id, completed); err != nil {
+	if _, err := a.requests.complete(persistenceCtx, id, completed); err != nil {
 		logger.Error("persist completed request", "err", err)
 	}
 }
 
-func newJobsHandler() http.Handler {
+func (a *api) newJobsHandler() http.Handler {
 	type JobsSummary struct {
 		ID              string    `json:"id,omitempty"`
 		Path            string    `json:"path,omitempty"`
@@ -238,7 +243,7 @@ func newJobsHandler() http.Handler {
 
 		ctx := r.Context()
 
-		reqs, err := requests.selectPage(ctx, cursor, filters, limit+1)
+		reqs, err := a.requests.selectPage(ctx, cursor, filters, limit+1)
 		if err != nil {
 			http.Error(
 				w,
@@ -271,7 +276,7 @@ func newJobsHandler() http.Handler {
 	})
 }
 
-func newJobHandler(cancelableJobs *safeMap[string, func()]) http.Handler {
+func (a *api) newJobHandler(cancelableJobs *safeMap[string, func()]) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "" {
@@ -283,7 +288,7 @@ func newJobHandler(cancelableJobs *safeMap[string, func()]) http.Handler {
 		case http.MethodGet:
 			ctx := r.Context()
 
-			job, err := requests.selectByUUID(ctx, id)
+			job, err := a.requests.selectByUUID(ctx, id)
 			if err != nil {
 				http.Error(w, "job not found: "+err.Error(), http.StatusNotFound)
 
@@ -457,11 +462,11 @@ var internalEndpoints = []Endpoint{
 	},
 }
 
-func newExecRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()], workers *sync.WaitGroup, password string) *http.ServeMux {
+func (a *api) newExecRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()], workers *sync.WaitGroup) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	for _, e := range config.Endpoints {
-		h := newExecHandler(ctx, workers, e, cancelableJobs)
+	for _, e := range a.config.Endpoints {
+		h := a.newExecHandler(ctx, workers, e, cancelableJobs)
 
 		pattern := fmt.Sprintf(
 			"%s %s",
@@ -471,8 +476,8 @@ func newExecRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()],
 
 		mux.Handle(pattern, chain(h,
 			withSecurityHeaders,
-			withAuth(password, authEnabled(!e.NoAuth)),
-			withMeta,
+			withAuth(a.config.Server.Password, authEnabled(!e.NoAuth)),
+			withMeta(a.config.sha),
 			withTracing,
 		))
 	}
@@ -480,29 +485,38 @@ func newExecRoutes(ctx context.Context, cancelableJobs *safeMap[string, func()],
 	return mux
 }
 
-func newAPIRoutes(cancelableJobs *safeMap[string, func()], password string) *http.ServeMux {
+func (a *api) newAPIRoutes(cancelableJobs *safeMap[string, func()]) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.Handle("GET /jobs/{id}", chain(newJobHandler(cancelableJobs),
+	mux.Handle("GET /jobs/{id}", chain(a.newJobHandler(cancelableJobs),
 		withSecurityHeaders,
-		withAuth(password),
-		withMeta,
+		withAuth(a.config.Server.Password),
+		withMeta(a.config.sha),
 		withTracing,
 	))
 
-	mux.Handle("GET /jobs", chain(newJobsHandler(),
+	mux.Handle("GET /jobs", chain(a.newJobsHandler(),
 		withSecurityHeaders,
-		withAuth(password),
-		withMeta,
+		withAuth(a.config.Server.Password),
+		withMeta(a.config.sha),
 		withTracing,
 	))
 
-	mux.Handle("GET /user-routes", chain(newUserRoutesHandler(append(internalEndpoints, config.Endpoints...)),
+	mux.Handle("GET /user-routes", chain(newUserRoutesHandler(append(internalEndpoints, a.config.Endpoints...)),
 		withSecurityHeaders,
-		withAuth(password),
-		withMeta,
+		withAuth(a.config.Server.Password),
+		withMeta(a.config.sha),
 		withTracing,
 	))
 
 	return mux
+}
+
+func (a *api) newHandler(ctx context.Context, workers *sync.WaitGroup, cancelableJobs *safeMap[string, func()]) http.Handler {
+	root := http.NewServeMux()
+
+	root.Handle(defaultUserPrefix+"/", a.newExecRoutes(ctx, cancelableJobs, workers))
+	root.Handle("/", a.newAPIRoutes(cancelableJobs))
+
+	return root
 }

@@ -141,20 +141,19 @@ func main() {
 
 	mustInitialize()
 
-	password := config.Server.Password
+	var (
+		api            = &api{config: config, requests: requests}
+		cancelableJobs = newSafeMap[string, func()]()
+		workers        = &sync.WaitGroup{}
+	)
 
-	root, cancelableJobs := http.NewServeMux(), newSafeMap[string, func()]()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	workers := &sync.WaitGroup{}
 
 	go cancelableJobs.periodicCompact(ctx, 60*time.Minute)
 
-	root.Handle(defaultUserPrefix+"/", newExecRoutes(ctx, cancelableJobs, workers, password))
-	root.Handle("/", newAPIRoutes(cancelableJobs, password))
-
 	srv := &http.Server{
 		Addr:              config.Server.ListenAddr,
-		Handler:           root,
+		Handler:           api.newHandler(ctx, workers, cancelableJobs),
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS13,
