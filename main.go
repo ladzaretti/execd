@@ -98,13 +98,7 @@ func mustHandleSubcommand(args []string, output io.Writer) {
 
 //revive:disable:deep-exit // Startup failures must terminate the process.
 func mustInitialize() {
-	defaultPath, err := defaultConfigPath()
-	if err != nil {
-		logger.Error("resolve default config path", "err", err)
-		os.Exit(1)
-	}
-
-	configPath := flag.String("config", "", fmt.Sprintf("config file path (default: %s)", defaultPath))
+	configPath := flag.String("config", "", "config file path (default: $XDG_CONFIG_HOME/.execd.toml; ~/.config/.execd.toml when unset)")
 
 	flag.Usage = func() {
 		_, _ = fmt.Fprintf(flag.CommandLine.Output(), usage, os.Args[0], os.Args[0], os.Args[0])
@@ -114,19 +108,21 @@ func mustInitialize() {
 
 	flag.Parse()
 
-	if *configPath == "" {
-		*configPath = defaultPath
-	}
-
-	c, err := loadFileConfig(*configPath)
+	resolvedConfigPath, err := resolveConfigPath(*configPath)
 	if err != nil {
-		logger.Error("open config file", "path", *configPath, "err", err)
+		logger.Error("resolve config path", "err", err)
 		os.Exit(1)
 	}
 
-	sha, err := hash(*configPath)
+	c, err := loadFileConfig(resolvedConfigPath)
 	if err != nil {
-		logger.Error("hash config file", "path", *configPath, "err", err)
+		logger.Error("open config file", "path", resolvedConfigPath, "err", err)
+		os.Exit(1)
+	}
+
+	sha, err := hash(resolvedConfigPath)
+	if err != nil {
+		logger.Error("hash config file", "path", resolvedConfigPath, "err", err)
 		os.Exit(1)
 	}
 
@@ -138,7 +134,7 @@ func mustInitialize() {
 	l, _ := parseLogLevel(c.Server.LogLevel) // already validated during config parsing
 
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l}))
-	logger.Info("resolved config", "path", configPath, "config", c.redact())
+	logger.Info("resolved config", "path", resolvedConfigPath, "config", c.redact())
 
 	config = c
 

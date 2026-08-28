@@ -105,7 +105,7 @@ Usage:
 The execd daemon exposes configured commands as authenticated HTTP endpoints.
 
   -config string
-    	config file path (default: /home/gbi/.config/.execd.toml)
+    	config file path (default: $XDG_CONFIG_HOME/.execd.toml; ~/.config/.execd.toml when unset)
 ```
 
 Start it with a config file:

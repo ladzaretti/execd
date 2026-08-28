@@ -146,6 +146,14 @@ func defaultConfigPath() (string, error) {
 	return filepath.Join(home, defaultConfigName), nil
 }
 
+func resolveConfigPath(path string) (string, error) {
+	if path != "" {
+		return path, nil
+	}
+
+	return defaultConfigPath()
+}
+
 func parseFileConfig(path string) (*Config, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
