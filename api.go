@@ -398,16 +398,43 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func toEnvKey(s string) (key string) {
 	buf := &bytes.Buffer{}
+	runes := []rune(s)
+	lastUnderscore := false
 
-	for i, r := range s {
-		if unicode.IsUpper(r) && i > 0 {
+	for i, r := range runes {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			if !lastUnderscore {
+				buf.WriteRune('_')
+
+				lastUnderscore = true
+			}
+
+			continue
+		}
+
+		if !lastUnderscore && isEnvKeyWordBoundary(runes, i) {
 			buf.WriteRune('_')
 		}
 
 		buf.WriteRune(unicode.ToUpper(r))
+
+		lastUnderscore = false
 	}
 
 	return buf.String()
+}
+
+func isEnvKeyWordBoundary(runes []rune, i int) bool {
+	if i == 0 || !unicode.IsUpper(runes[i]) {
+		return false
+	}
+
+	previous := runes[i-1]
+	if unicode.IsLower(previous) || unicode.IsDigit(previous) {
+		return true
+	}
+
+	return unicode.IsUpper(previous) && i+1 < len(runes) && unicode.IsLower(runes[i+1])
 }
 
 func paramsToEnv(r *http.Request, pathParams []string) []string {
@@ -475,7 +502,6 @@ func (a *api) newExecRoutes(ctx context.Context, cancelableJobs *safeMap[string,
 		)
 
 		mux.Handle(pattern, chain(h,
-			withSecurityHeaders,
 			withAuth(a.config.Server.Password, authEnabled(!e.NoAuth)),
 			withMeta(a.config.sha),
 			withTracing,
@@ -488,22 +514,19 @@ func (a *api) newExecRoutes(ctx context.Context, cancelableJobs *safeMap[string,
 func (a *api) newAPIRoutes(cancelableJobs *safeMap[string, func()]) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.Handle("GET /jobs/{id}", chain(a.newJobHandler(cancelableJobs),
-		withSecurityHeaders,
+	mux.Handle("/jobs/{id}", chain(a.newJobHandler(cancelableJobs),
 		withAuth(a.config.Server.Password),
 		withMeta(a.config.sha),
 		withTracing,
 	))
 
 	mux.Handle("GET /jobs", chain(a.newJobsHandler(),
-		withSecurityHeaders,
 		withAuth(a.config.Server.Password),
 		withMeta(a.config.sha),
 		withTracing,
 	))
 
 	mux.Handle("GET /user-routes", chain(newUserRoutesHandler(append(internalEndpoints, a.config.Endpoints...)),
-		withSecurityHeaders,
 		withAuth(a.config.Server.Password),
 		withMeta(a.config.sha),
 		withTracing,

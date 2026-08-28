@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,11 +12,17 @@ import (
 )
 
 const (
-	testPassword    = "test-password"
+	TestPassword    = "test-password"
 	sqliteMemFormat = "file:%s?mode=memory&cache=shared"
 )
 
-func newTestApp(t *testing.T, config *Config) (http.Handler, *sync.WaitGroup) {
+type TestApp struct {
+	Handler  http.Handler
+	requests *requestStore
+	workers  *sync.WaitGroup
+}
+
+func NewTestApp(t *testing.T, config *Config) *TestApp {
 	t.Helper()
 
 	if err := config.validate(); err != nil {
@@ -28,19 +35,12 @@ func newTestApp(t *testing.T, config *Config) (http.Handler, *sync.WaitGroup) {
 
 	config.complete()
 
-	database, err := newExecDB(testDatabaseDSN(t.Name()))
-	if err != nil {
-		t.Fatalf("open in-memory database: %v", err)
-	}
+	database := NewTestRequestStore(t)
 
 	workers := &sync.WaitGroup{}
 
 	t.Cleanup(func() {
 		workers.Wait()
-
-		if err := database.close(); err != nil {
-			t.Errorf("close in-memory database: %v", err)
-		}
 	})
 
 	app := &api{
@@ -49,33 +49,63 @@ func newTestApp(t *testing.T, config *Config) (http.Handler, *sync.WaitGroup) {
 	}
 	handler := app.newHandler(t.Context(), workers, newSafeMap[string, func()]())
 
-	return handler, workers
+	return &TestApp{
+		Handler:  handler,
+		requests: database,
+		workers:  workers,
+	}
 }
 
-func testConfig(endpoints ...Endpoint) *Config {
+func NewTestConfig(endpoints ...Endpoint) *Config {
 	return &Config{
 		Server: Server{
 			ListenAddr: "127.0.0.1:0",
-			Password:   testPassword,
+			Password:   TestPassword,
 		},
 		Endpoints: endpoints,
 		sha:       "test-sha",
 	}
 }
 
-func testDatabaseDSN(testName string) string {
+func MemoryDatabaseDSN(testName string) string {
 	return fmt.Sprintf(sqliteMemFormat, url.PathEscape(testName))
 }
 
-func requireStatusCode(t *testing.T, response *httptest.ResponseRecorder, want int) {
+func NewTestRequestStore(t *testing.T) *requestStore {
 	t.Helper()
 
-	if got := response.Code; got != want {
+	database, err := newExecDB(MemoryDatabaseDSN(t.Name()))
+	if err != nil {
+		t.Fatalf("open in-memory database: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if err := database.close(); err != nil {
+			t.Errorf("close in-memory database: %v", err)
+		}
+	})
+
+	return database
+}
+
+func (a *TestApp) Wait() { a.workers.Wait() }
+
+func (a *TestApp) Insert(ctx context.Context, id, state string) (int, error) {
+	return a.requests.insert(ctx, id, RequestState{
+		Path:  "/exec/ping",
+		State: execState(state),
+	})
+}
+
+func RequireStatusCode(t *testing.T, response *httptest.ResponseRecorder, wantStatus int) {
+	t.Helper()
+
+	if got, want := response.Code, wantStatus; got != want {
 		t.Fatalf("got response status %d, want %d; body: %s", got, want, response.Body.String())
 	}
 }
 
-func mustDecodeJSON(t *testing.T, response *httptest.ResponseRecorder, dst any) {
+func MustDecodeJSON(t *testing.T, response *httptest.ResponseRecorder, dst any) {
 	t.Helper()
 
 	if err := json.NewDecoder(response.Body).Decode(dst); err != nil {

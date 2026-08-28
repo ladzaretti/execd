@@ -89,16 +89,6 @@ func withAuth(password string, options ...authOption) func(h http.Handler) http.
 	}
 }
 
-func withSecurityHeaders(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'self'")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-
-		h.ServeHTTP(w, r)
-	})
-}
-
 func withTracing(h http.Handler) http.Handler {
 	const hdrRequestID = "X-Request-Id"
 
