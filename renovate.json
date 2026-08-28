@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "customManagers:makefileVersions",
+    "customManagers:githubActionsVersions",
+    ":gomod"
+  ],
+  "dependencyDashboard": true,
+  "postUpdateOptions": ["gomodTidy"],
+  "packageRules": [
+    {
+      "description": "Update golangci-lint",
+      "matchPackageNames": ["golangci/golangci-lint"],
+      "automerge": true
+    },
+    {
+      "description": "Update GitHub Actions",
+      "matchFileNames": [".github/**/*.yml"],
+      "automerge": true
+    }
+  ]
+}
