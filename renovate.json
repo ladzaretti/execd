@@ -3,18 +3,11 @@
   "extends": [
     "config:recommended",
     "customManagers:makefileVersions",
-    "customManagers:githubActionsVersions",
     ":gomod"
   ],
   "dependencyDashboard": true,
   "postUpdateOptions": ["gomodTidy"],
   "packageRules": [
-    {
-      "description": "Update Go toolchain",
-      "matchDatasources": ["golang-version"],
-      "matchDepNames": ["go"],
-      "groupName": "Go toolchain"
-    },
     {
       "description": "Update golangci-lint",
       "matchPackageNames": ["golangci/golangci-lint"],
