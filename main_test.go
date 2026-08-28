@@ -10,7 +10,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 
-	execd "github.com/ladzaretti/exec"
+	execd "github.com/ladzaretti/execd" //revive:disable-line:redundant-import-alias // The root package is main; external tests import it as execd.
 )
 
 type acceptedJob struct {

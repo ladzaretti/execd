@@ -149,7 +149,7 @@ formatters:
           replacement: "any"
     goimports:
       local-prefixes:
-        - github.com/ladzaretti/exec
+        - github.com/ladzaretti/execd
 
 run:
   timeout: "3m"
