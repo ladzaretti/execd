@@ -43,7 +43,7 @@ func TestHandleSubcommandConfigGenerate(t *testing.T) {
 	want := `[server]
 # Log level (default: info).
 # log_level = ''
-# SQLite database path (default: XDG cache directory/.execd.d/execd.sqlite).
+# SQLite database path (default: $XDG_CACHE_HOME/.execd.d/execd.sqlite; ~/.cache/.execd.d/execd.sqlite when unset).
 # database_path = ''
 # Bearer token for protected endpoints (required).
 password = ''

@@ -65,9 +65,17 @@ Start it with a config file:
 execd -config /etc/execd.toml
 ```
 
-For a systemd deployment, the release includes an example unit. Copy it after configuring `/etc/execd.toml`:
+For a systemd deployment, set a persistent database location in `/etc/execd.toml`. systemd does not provide a user cache directory by default:
+
+```toml
+[server]
+database_path = "/var/lib/execd/execd.sqlite"
+```
+
+Create the directory, then copy the release's example unit:
 
 ```bash
+sudo install -d -m 0700 /var/lib/execd
 sudo curl -fsSL \
   -o /etc/systemd/system/execd.service \
   "https://raw.githubusercontent.com/ladzaretti/execd/$(execd version)/systemd/execd.service"

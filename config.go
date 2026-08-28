@@ -16,13 +16,13 @@ import (
 
 //revive:disable:struct-tag // go-toml/v2 supports the commented TOML tag option.
 type Server struct {
-	LogLevel   string `comment:"Log level (default: info)."                                                 json:"log_level,omitempty"     toml:"log_level,commented"`
-	DBPath     string `comment:"SQLite database path (default: XDG cache directory/.execd.d/execd.sqlite)." json:"database_path,omitempty" toml:"database_path,commented"`
-	Password   string `comment:"Bearer token for protected endpoints (required)."                           json:"password,omitempty"      toml:"password"`
-	ListenAddr string `comment:"Listen address (required)."                                                 json:"listen_addr,omitempty"   toml:"listen_addr"`
-	TLS        bool   `comment:"Enable TLS."                                                                json:"tls,omitempty"           toml:"tls,commented"`
-	CertFile   string `comment:"TLS certificate file (required when tls is true)."                          json:"cert_file,omitempty"     toml:"cert_file,commented"`
-	KeyFile    string `comment:"TLS private key file (required when tls is true)."                          json:"key_file,omitempty"      toml:"key_file,commented"`
+	LogLevel   string `comment:"Log level (default: info)."                                                                                        json:"log_level,omitempty"     toml:"log_level,commented"`
+	DBPath     string `comment:"SQLite database path (default: $XDG_CACHE_HOME/.execd.d/execd.sqlite; ~/.cache/.execd.d/execd.sqlite when unset)." json:"database_path,omitempty" toml:"database_path,commented"`
+	Password   string `comment:"Bearer token for protected endpoints (required)."                                                                  json:"password,omitempty"      toml:"password"`
+	ListenAddr string `comment:"Listen address (required)."                                                                                        json:"listen_addr,omitempty"   toml:"listen_addr"`
+	TLS        bool   `comment:"Enable TLS."                                                                                                       json:"tls,omitempty"           toml:"tls,commented"`
+	CertFile   string `comment:"TLS certificate file (required when tls is true)."                                                                 json:"cert_file,omitempty"     toml:"cert_file,commented"`
+	KeyFile    string `comment:"TLS private key file (required when tls is true)."                                                                 json:"key_file,omitempty"      toml:"key_file,commented"`
 }
 
 type Config struct {
