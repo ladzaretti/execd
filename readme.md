@@ -9,7 +9,7 @@
 ![status: beta](https://img.shields.io/badge/status-beta-yellow)
 ![license](https://img.shields.io/github/license/ladzaretti/execd)
 
-`execd` is a small self-hosted daemon for triggering explicitly configured commands over HTTP and inspecting their job history. It is intended for private homelabs and trusted callers—not direct public-internet exposure.
+`execd` is a small self-hosted daemon for triggering explicitly configured commands over HTTP and inspecting their job history. It is intended for private homelabs and trusted callers, not direct public-internet exposure.
 
 ## Installation
 
