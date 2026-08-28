@@ -10,6 +10,12 @@
   "postUpdateOptions": ["gomodTidy"],
   "packageRules": [
     {
+      "description": "Update Go toolchain",
+      "matchDatasources": ["golang-version"],
+      "matchDepNames": ["go"],
+      "groupName": "Go toolchain"
+    },
+    {
       "description": "Update golangci-lint",
       "matchPackageNames": ["golangci/golangci-lint"],
       "automerge": true

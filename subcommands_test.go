@@ -10,11 +10,6 @@ import (
 func TestHandleSubcommandVersion(t *testing.T) {
 	t.Parallel()
 
-	original := Version
-	Version = "v1.2.3-test"
-
-	t.Cleanup(func() { Version = original })
-
 	var output bytes.Buffer
 
 	handled, err := handleSubcommand([]string{"version"}, &output)
@@ -26,7 +21,7 @@ func TestHandleSubcommandVersion(t *testing.T) {
 		t.Fatal("version subcommand was not handled")
 	}
 
-	if got, want := output.String(), "v1.2.3-test\n"; got != want {
+	if got, want := output.String(), Version+"\n"; got != want {
 		t.Errorf("got version output %q, want %q", got, want)
 	}
 }

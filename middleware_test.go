@@ -122,14 +122,14 @@ func TestWithTracingPreservesRequestID(t *testing.T) {
 	}))
 
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
-	request.Header.Set("X-Request-Id", requestID)
+	request.Header.Set("X-Request-ID", requestID)
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
 	RequireStatusCode(t, response, http.StatusNoContent)
 
-	if got, want := response.Header().Get("X-Request-Id"), requestID; got != want {
+	if got, want := response.Header().Get("X-Request-ID"), requestID; got != want {
 		t.Errorf("got response request ID %q, want %q", got, want)
 	}
 }

@@ -90,7 +90,7 @@ func withAuth(password string, options ...authOption) func(h http.Handler) http.
 }
 
 func withTracing(h http.Handler) http.Handler {
-	const hdrRequestID = "X-Request-Id"
+	const hdrRequestID = "X-Request-ID"
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(hdrRequestID)
