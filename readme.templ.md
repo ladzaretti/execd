@@ -14,6 +14,14 @@
 go install github.com/ladzaretti/execd@latest
 ```
 
+### Linux installer
+
+```bash
+curl -sSL https://raw.githubusercontent.com/ladzaretti/execd/main/install.sh | bash
+```
+
+The installer downloads the latest Linux release and installs `execd` to `/usr/local/bin`.
+
 ### Build from source
 
 ```bash
@@ -55,6 +63,18 @@ Start it with a config file:
 
 ```bash
 execd -config /etc/execd.toml
+```
+
+For a systemd deployment, the release includes an example unit. Copy it after configuring `/etc/execd.toml`:
+
+```bash
+VERSION="$(execd version)"
+sudo curl -fsSL \
+  -o /etc/systemd/system/execd.service \
+  "https://raw.githubusercontent.com/ladzaretti/execd/${VERSION}/systemd/execd.service"
+sudo chmod 0644 /etc/systemd/system/execd.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now execd
 ```
 
 Trigger a protected endpoint and inspect its asynchronous job:

@@ -1,0 +1,12 @@
+[Unit]
+Description=execd - configured command HTTP daemon
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/execd -config /etc/execd.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

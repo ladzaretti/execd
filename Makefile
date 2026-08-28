@@ -30,6 +30,9 @@ build: bin/$(BIN_NAME)
 build-dist: build
 	mkdir -p dist
 	cp ./bin/$(BIN_NAME) LICENSE ./dist/
+	cp ./scripts/install.sh ./dist/install.sh
+	cp ./assets/default-config.toml ./dist/execd.toml
+	cp -r ./systemd ./dist/
 
 assets/default-config.toml: bin/$(BIN_NAME)
 	./bin/$(BIN_NAME) config generate > $@

@@ -18,11 +18,16 @@ snapshot:
 
 archives:
   - id: "execd"
-    name_template: "execd{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "execd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     wrap_in_directory: true
 
     files:
       - LICENSE
+      - systemd/execd.service
+      - src: scripts/install.sh
+        dst: install.sh
+      - src: assets/default-config.toml
+        dst: execd.toml
 
     ids: [execd]
     formats: [tar.gz]
