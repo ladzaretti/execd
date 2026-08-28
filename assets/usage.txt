@@ -1,0 +1,9 @@
+Usage:
+  ./bin/execd [flags]
+  ./bin/execd config generate
+  ./bin/execd version
+
+The execd daemon exposes configured commands as authenticated HTTP endpoints.
+
+  -config string
+    	config file path (default: /home/gbi/.config/.execd.toml)

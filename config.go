@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -15,18 +16,18 @@ import (
 
 //revive:disable:struct-tag // go-toml/v2 supports the commented TOML tag option.
 type Server struct {
-	LogLevel   string `json:"log_level,omitempty"     toml:"log_level,commented"`
-	DBPath     string `json:"database_path,omitempty" toml:"database_path,commented"`
-	Password   string `json:"password,omitempty"      toml:"password,commented"`
-	ListenAddr string `json:"listen_addr,omitempty"   toml:"listen_addr,commented"`
-	TLS        bool   `json:"tls,omitempty"           toml:"tls,commented"`
-	CertFile   string `json:"cert_file,omitempty"     toml:"cert_file,commented"`
-	KeyFile    string `json:"key_file,omitempty"      toml:"key_file,commented"`
+	LogLevel   string `comment:"Log level (default: info)."                                                 json:"log_level,omitempty"     toml:"log_level,commented"`
+	DBPath     string `comment:"SQLite database path (default: XDG cache directory/.execd.d/execd.sqlite)." json:"database_path,omitempty" toml:"database_path,commented"`
+	Password   string `comment:"Bearer token for protected endpoints (required)."                           json:"password,omitempty"      toml:"password"`
+	ListenAddr string `comment:"Listen address (required)."                                                 json:"listen_addr,omitempty"   toml:"listen_addr"`
+	TLS        bool   `comment:"Enable TLS."                                                                json:"tls,omitempty"           toml:"tls,commented"`
+	CertFile   string `comment:"TLS certificate file (required when tls is true)."                          json:"cert_file,omitempty"     toml:"cert_file,commented"`
+	KeyFile    string `comment:"TLS private key file (required when tls is true)."                          json:"key_file,omitempty"      toml:"key_file,commented"`
 }
 
 type Config struct {
-	Server    Server     `json:"server,omitempty"    toml:"server,commented"`
-	Endpoints []Endpoint `json:"endpoints,omitempty" toml:"endpoints,commented"`
+	Server    Server     `json:"server,omitempty"    toml:"server"`
+	Endpoints []Endpoint `json:"endpoints,omitempty" toml:"endpoints"`
 
 	configPath string
 	sha        string
@@ -112,6 +113,28 @@ func (c *Config) complete() {
 	for i := range c.Endpoints {
 		c.Endpoints[i].resolve()
 	}
+}
+
+func newDefaultConfig() Config {
+	return Config{
+		Server: Server{ListenAddr: ":8443"},
+		Endpoints: []Endpoint{
+			{
+				Summary: "Health check.",
+				Path:    "/ping",
+				Method:  "GET",
+				Cmd:     []string{"/usr/bin/echo", "pong"},
+			},
+		},
+	}
+}
+
+func writeDefaultConfig(w io.Writer) error {
+	if err := toml.NewEncoder(w).Encode(newDefaultConfig()); err != nil {
+		return fmt.Errorf("encode default config: %v", err)
+	}
+
+	return nil
 }
 
 func defaultConfigPath() (string, error) {

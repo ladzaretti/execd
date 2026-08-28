@@ -23,7 +23,11 @@ import (
 
 var Version = "v0.0.0"
 
-const usage = `Usage: %s [flags]
+const usage = `Usage:
+  %s [flags]
+  %s config generate
+  %s version
+
 The execd daemon exposes configured commands as authenticated HTTP endpoints.
 
 `
@@ -42,22 +46,51 @@ var (
 	requests *requestStore
 )
 
-//revive:disable:deep-exit // A cli only helper.
-func subcommands() {
-	if len(os.Args) == 1 {
-		return
+func handleSubcommand(args []string, output io.Writer) (bool, error) {
+	if len(args) == 0 {
+		return false, nil
 	}
 
-	switch os.Args[1] {
-	case "version":
-		if len(os.Args) > 2 {
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nusage: %s [version]\n", strings.Join(os.Args[1:], " "), os.Args[0])
-			os.Exit(2)
+	switch args[0] {
+	case "config":
+		if len(args) != 2 || args[1] != "generate" {
+			return true, fmt.Errorf("unknown command: %s\nusage: %s config generate", strings.Join(args, " "), os.Args[0])
 		}
 
-		fmt.Println(Version)
-		os.Exit(0)
+		if err := writeDefaultConfig(output); err != nil {
+			return true, err
+		}
+
+		return true, nil
+	case "version":
+		if len(args) > 1 {
+			return true, fmt.Errorf("unknown command: %s\nusage: %s [version]", strings.Join(args, " "), os.Args[0])
+		}
+
+		if _, err := fmt.Fprintln(output, Version); err != nil {
+			return true, fmt.Errorf("print version: %v", err)
+		}
+
+		return true, nil
 	default:
+		if !strings.HasPrefix(args[0], "-") {
+			return false, fmt.Errorf("unknown command: %s", strings.Join(args, " "))
+		}
+
+		return false, nil
+	}
+}
+
+//revive:disable:deep-exit // This startup helper intentionally terminates the process.
+func mustHandleSubcommand(args []string, output io.Writer) {
+	handled, err := handleSubcommand(args, output)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+
+	if handled {
+		os.Exit(0)
 	}
 }
 
@@ -74,7 +107,7 @@ func mustInitialize() {
 	configPath := flag.String("config", "", fmt.Sprintf("config file path (default: %s)", defaultPath))
 
 	flag.Usage = func() {
-		_, _ = fmt.Fprintf(flag.CommandLine.Output(), usage, os.Args[0])
+		_, _ = fmt.Fprintf(flag.CommandLine.Output(), usage, os.Args[0], os.Args[0], os.Args[0])
 
 		flag.PrintDefaults()
 	}
@@ -137,7 +170,7 @@ func hash(filename string) (string, error) {
 }
 
 func main() {
-	subcommands()
+	mustHandleSubcommand(os.Args[1:], os.Stdout)
 
 	mustInitialize()
 

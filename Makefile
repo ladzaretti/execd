@@ -31,6 +31,16 @@ build-dist: build
 	mkdir -p dist
 	cp ./bin/$(BIN_NAME) LICENSE ./dist/
 
+assets/default-config.toml: bin/$(BIN_NAME)
+	./bin/$(BIN_NAME) config generate > $@
+
+assets/usage.txt: bin/$(BIN_NAME)
+	./bin/$(BIN_NAME) -h > $@ 2>&1
+
+.PHONY: readme.md
+readme.md: readme.templ.md assets/default-config.toml assets/usage.txt scripts/readme_gen.sh
+	./scripts/readme_gen.sh readme.templ.md readme.md
+
 .PHONY: go-mod-tidy
 go-mod-tidy:
 	go mod tidy

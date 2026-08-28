@@ -32,16 +32,16 @@ type resolvedEndpoint struct {
 type Endpoint struct {
 	resolvedEndpoint
 
-	Summary      string   `json:"summary,omitempty"       toml:"summary,commented"`
-	Path         string   `json:"path,omitempty"          toml:"path,commented"`
-	Method       string   `json:"method,omitempty"        toml:"method,commented"`
-	Cmd          []string `json:"cmd,omitempty"           toml:"cmd,commented"`
-	EnvAllowlist []string `json:"env_allowlist,omitempty" toml:"env_allowlist,commented"`
-	Detached     bool     `json:"detached,omitempty"      toml:"detached,commented"`
-	UID          uint32   `json:"uid,omitempty"           toml:"uid,commented"`
-	GID          uint32   `json:"gid,omitempty"           toml:"gid,commented"`
-	Timeout      string   `json:"timeout,omitempty"       toml:"timeout,commented"`
-	NoAuth       bool     `json:"no_auth,omitempty"       toml:"no_auth,commented"`
+	Summary      string   `comment:"Human-readable route description."                                                                    json:"summary,omitempty"       toml:"summary"`
+	Path         string   `comment:"Route path below /exec (required)."                                                                   json:"path,omitempty"          toml:"path"`
+	Method       string   `comment:"HTTP method (default: POST)."                                                                         json:"method,omitempty"        toml:"method"`
+	Cmd          []string `comment:"Fixed command and arguments (required)."                                                              json:"cmd,omitempty"           toml:"cmd"`
+	EnvAllowlist []string `comment:"Environment variables inherited from execd."                                                          json:"env_allowlist,omitempty" toml:"env_allowlist,commented"`
+	Detached     bool     `comment:"Start without waiting for completion."                                                                json:"detached,omitempty"      toml:"detached,commented"`
+	UID          uint32   `comment:"UID to run as (requires execd to run as root)."                                                       json:"uid,omitempty"           toml:"uid,commented"`
+	GID          uint32   `comment:"GID to run as (requires execd to run as root)."                                                       json:"gid,omitempty"           toml:"gid,commented"`
+	Timeout      string   `comment:"Maximum execution time as a Go duration (for example: 30s, 5m); not available for detached commands." json:"timeout,omitempty"       toml:"timeout,commented"`
+	NoAuth       bool     `comment:"Disable authentication for this execution route."                                                     json:"no_auth,omitempty"       toml:"no_auth,commented"`
 }
 
 //revive:enable:struct-tag
