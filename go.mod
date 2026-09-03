@@ -7,7 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/ladzaretti/migrate v0.1.7
 	github.com/pelletier/go-toml/v2 v2.4.3
-	modernc.org/sqlite v1.57.0
+	modernc.org/sqlite v1.58.0
 )
 
 require (
